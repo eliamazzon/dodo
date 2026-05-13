@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "DODO",
+  "version": "0.1.0",
+  "description": "Open-source browser agent — bring your own Gemini API key.",
+  "action": { "default_title": "DODO" },
+  "side_panel": { "default_path": "src/sidepanel/index.html" },
+  "background": { "service_worker": "background/service-worker.js", "type": "module" },
+  "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting", "notifications"],
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Ctrl+Shift+D", "mac": "Command+Shift+D" },
+      "description": "Open DODO side panel"
+    }
+  }
+}
