@@ -92,6 +92,8 @@ export function useAgent() {
     reset: () => send({ kind: 'reset' }),
     setMode: (mode: Mode) => send({ kind: 'set_mode', mode }),
     testNotify: () => send({ kind: 'test_notify' }),
+    openHistory: (id: string) => send({ kind: 'open_history', id }),
+    deleteHistory: (id: string) => send({ kind: 'delete_history', id }),
   };
 }
 

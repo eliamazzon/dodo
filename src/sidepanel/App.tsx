@@ -20,10 +20,18 @@ export function App() {
   const { snap } = a;
 
   if (view === 'settings') {
-    return <Settings c={c} settings={snap.settings} onClose={() => setView('agent')}/>;
+    return <Settings c={c} settings={snap.settings} onClose={() => setView('agent')} onTestNotify={a.testNotify}/>;
   }
   if (view === 'history') {
-    return <History c={c} items={snap.history} onClose={() => setView('agent')}/>;
+    return (
+      <History
+        c={c}
+        items={snap.history}
+        onClose={() => setView('agent')}
+        onOpen={(id) => { a.openHistory(id); setView('agent'); }}
+        onDelete={(id) => a.deleteHistory(id)}
+      />
+    );
   }
 
   const common = {

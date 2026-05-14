@@ -1,3 +1,4 @@
+// Gemini API provider — translates the internal ChatMessage format to Gemini's generateContent REST API.
 import type { ModelProvider, ChatRequest, ChatResponse, ChatMessage } from './types';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';

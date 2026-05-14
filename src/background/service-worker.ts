@@ -1,5 +1,6 @@
+// Extension lifecycle host — manages the long-lived Chrome Port to the side panel and routes UI messages to the Agent singleton.
 import { agent } from './agent';
-import { loadStore, saveSettings } from './store';
+import { loadStore, saveSettings, deleteHistoryItem } from './store';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../shared/messages';
 import { notifyForce } from './notify';
 
@@ -24,6 +25,7 @@ chrome.runtime.onConnect.addListener((port) => {
   };
 
   unsub = agent.subscribe(() => { void send(); });
+  void send();
 
   port.onMessage.addListener(async (msg: PanelToBg) => {
     switch (msg.kind) {
@@ -60,6 +62,13 @@ chrome.runtime.onConnect.addListener((port) => {
         break;
       case 'test_notify':
         void notifyForce('dodo · notifications on', "you'll be pinged when the agent finishes or needs you.");
+        break;
+      case 'open_history':
+        await agent.openHistory(msg.id);
+        break;
+      case 'delete_history':
+        await deleteHistoryItem(msg.id);
+        void send();
         break;
     }
   });

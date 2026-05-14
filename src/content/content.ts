@@ -1,5 +1,7 @@
+// Content script injected on demand into the active tab; provides DOM query and interaction primitives for the agent.
 import type { ContentOp, ContentResult } from '../shared/messages';
 
+// Guard against double-registration: executeScript re-runs this file on each injection but event listeners accumulate without this check.
 const SENTINEL = '__dodo_content_installed__';
 
 declare global {
@@ -29,6 +31,8 @@ function cssEscape(s: string): string {
   return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
 }
 
+// Selector priority: ID > data-testid > name attr > aria-label > placeholder > structural nth-of-type path.
+// Earlier attributes are stable semantic identifiers; the structural fallback is fragile but always produces a unique path.
 function bestSelector(el: Element): string {
   const tag = el.tagName.toLowerCase();
   const id = (el as HTMLElement).id;

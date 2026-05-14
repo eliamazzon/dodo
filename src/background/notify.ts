@@ -1,8 +1,7 @@
 import { getSettings } from './store';
 import { log } from './log';
 
-// 32x32 purple #6b4ea3 PNG, base64-encoded — used as the notification icon.
-export const NOTIFY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgAQMAAABJtOi3AAAABlBMVEVrTqP///+xV9MoAAAAGklEQVQYlWNgGAWjYBSMglEwCkbBKBgFwwUAB+gAAdiqs8gAAAAASUVORK5CYII=';
+export const NOTIFY_ICON = chrome.runtime.getURL('icons/spark-128.png');
 
 export async function notify(title: string, message: string): Promise<void> {
   const settings = await getSettings();

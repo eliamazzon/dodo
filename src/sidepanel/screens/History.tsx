@@ -2,28 +2,26 @@ import { useState } from 'react';
 import type { Palette } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
 import { PanelShell, Body } from '../components/PanelShell';
-import { IcoBtn } from '../components/PanelHeader';
 import type { HistoryItem } from '../../shared/types';
 
-const FILTERS = ['all', 'done', 'error', 'watching'] as const;
+const FILTERS = ['all', 'running', 'done', 'error', 'stopped'] as const;
 type Filter = typeof FILTERS[number];
 
 export function History({
-  c, items, onClose,
+  c, items, onClose, onOpen, onDelete,
 }: {
   c: Palette;
   items: HistoryItem[];
   onClose: () => void;
+  onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
   const [filter, setFilter] = useState<Filter>('all');
   const statusColor: Record<HistoryItem['status'], string> = {
-    done: c.success, paused: c.warn, error: c.error, watch: c.accent,
+    running: c.accent, done: c.success, paused: c.warn,
+    error: c.error, stopped: c.muted, watch: c.accent,
   };
-  const filtered = items.filter((it) => {
-    if (filter === 'all') return true;
-    if (filter === 'watching') return it.status === 'watch';
-    return it.status === filter;
-  });
+  const filtered = items.filter((it) => filter === 'all' ? true : it.status === filter);
   return (
     <PanelShell c={c}>
       <div style={{
@@ -38,7 +36,6 @@ export function History({
         <span style={{ fontSize: 13, fontWeight: 600 }}>history</span>
         <span style={{ flex: 1 }}/>
         <span style={{ fontSize: 10.5, color: c.muted }}>{items.length} tasks</span>
-        <IcoBtn c={c}><Ic.Search size={14}/></IcoBtn>
       </div>
       <div style={{
         padding: '6px 14px', borderBottom: `1px solid ${c.border}`,
@@ -66,33 +63,62 @@ export function History({
           </div>
         )}
         {filtered.map((it) => (
-          <div key={it.id} style={{
-            padding: '12px 16px', borderBottom: `1px solid ${c.border}`,
-            display: 'flex', flexDirection: 'column', gap: 4,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{
-                width: 6, height: 6, borderRadius: 1, background: statusColor[it.status], flexShrink: 0,
-              }}/>
-              <span style={{ fontSize: 12.5, color: c.ink, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {it.title}
-              </span>
-              <span style={{ fontSize: 10.5, color: c.subtle, flexShrink: 0 }}>{relTime(it.startedAt)}</span>
-            </div>
-            <div style={{
-              display: 'flex', gap: 8, paddingLeft: 14,
-              fontSize: 10.5, color: c.muted,
-            }}>
-              <span>{it.sub}</span>
-              <span style={{ color: c.subtle }}>·</span>
-              <span>{it.steps} steps</span>
-              <span style={{ flex: 1 }}/>
-              <span style={{ color: statusColor[it.status] }}>{it.status}</span>
-            </div>
-          </div>
+          <Row key={it.id} c={c} it={it} statusColor={statusColor[it.status]}
+            onOpen={() => onOpen(it.id)} onDelete={() => onDelete(it.id)}/>
         ))}
       </Body>
     </PanelShell>
+  );
+}
+
+function Row({
+  c, it, statusColor, onOpen, onDelete,
+}: {
+  c: Palette; it: HistoryItem; statusColor: string;
+  onOpen: () => void; onDelete: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={onOpen}
+      style={{
+        padding: '12px 16px', borderBottom: `1px solid ${c.border}`,
+        display: 'flex', flexDirection: 'column', gap: 4, cursor: 'pointer',
+        background: hover ? c.surface : 'transparent',
+      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{
+          width: 6, height: 6, borderRadius: 1, background: statusColor, flexShrink: 0,
+        }}/>
+        <span style={{ fontSize: 12.5, color: c.ink, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {it.title}
+        </span>
+        <span style={{ fontSize: 10.5, color: c.subtle, flexShrink: 0 }}>{relTime(it.startedAt)}</span>
+        <button
+          type="button"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(); }}
+          style={{
+            background: 'transparent', border: 'none', padding: 2, cursor: 'pointer',
+            color: c.subtle, opacity: hover ? 1 : 0, transition: 'opacity 0.15s',
+            display: 'inline-flex', alignItems: 'center',
+          }}
+          aria-label="delete">
+          <Ic.X size={12}/>
+        </button>
+      </div>
+      <div style={{
+        display: 'flex', gap: 8, paddingLeft: 14,
+        fontSize: 10.5, color: c.muted,
+      }}>
+        <span>{it.sub}</span>
+        <span style={{ color: c.subtle }}>·</span>
+        <span>{it.steps} steps</span>
+        <span style={{ flex: 1 }}/>
+        <span style={{ color: statusColor }}>{it.status}</span>
+      </div>
+    </div>
   );
 }
 

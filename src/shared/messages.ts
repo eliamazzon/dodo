@@ -11,7 +11,9 @@ export type PanelToBg =
   | { kind: 'retry' }
   | { kind: 'reset' }
   | { kind: 'set_mode'; mode: Mode }
-  | { kind: 'test_notify' };
+  | { kind: 'test_notify' }
+  | { kind: 'open_history'; id: string }
+  | { kind: 'delete_history'; id: string };
 
 export type BgToPanel =
   | { kind: 'state'; state: AgentState; settings: Settings; allowlist: string[]; history: HistoryItem[] };

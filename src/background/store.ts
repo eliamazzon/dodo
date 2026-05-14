@@ -1,3 +1,4 @@
+// Chrome storage access layer — all persisted state (settings, allowlist, history) lives in chrome.storage.local.
 import { DEFAULT_SETTINGS, type Settings, type HistoryItem } from '../shared/types';
 
 type StoreShape = {
@@ -7,7 +8,7 @@ type StoreShape = {
 };
 
 const KEYS = ['settings', 'allowlist', 'history'] as const;
-const HISTORY_MAX = 200;
+const HISTORY_MAX = 200; // oldest items are evicted once this cap is reached
 const DEFAULT_ALLOWLIST = ['*.google.com', '*.github.com', '*.notion.so', '*.wikipedia.org'];
 
 export async function loadStore(): Promise<StoreShape> {
@@ -56,6 +57,36 @@ export async function getHistory(): Promise<HistoryItem[]> {
 export async function appendHistory(item: HistoryItem): Promise<HistoryItem[]> {
   const list = await getHistory();
   const next = [item, ...list].slice(0, HISTORY_MAX);
+  await chrome.storage.local.set({ history: next });
+  return next;
+}
+
+export async function upsertHistory(item: HistoryItem): Promise<HistoryItem[]> {
+  const list = await getHistory();
+  const idx = list.findIndex((it) => it.id === item.id);
+  let next: HistoryItem[];
+  if (idx >= 0) {
+    next = list.slice();
+    next[idx] = { ...list[idx], ...item };
+    // move freshly-updated row to the top
+    const [moved] = next.splice(idx, 1);
+    next.unshift(moved);
+  } else {
+    next = [item, ...list];
+  }
+  next = next.slice(0, HISTORY_MAX);
+  await chrome.storage.local.set({ history: next });
+  return next;
+}
+
+export async function getHistoryItem(id: string): Promise<HistoryItem | undefined> {
+  const list = await getHistory();
+  return list.find((it) => it.id === id);
+}
+
+export async function deleteHistoryItem(id: string): Promise<HistoryItem[]> {
+  const list = await getHistory();
+  const next = list.filter((it) => it.id !== id);
   await chrome.storage.local.set({ history: next });
   return next;
 }

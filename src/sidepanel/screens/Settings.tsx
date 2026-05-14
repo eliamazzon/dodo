@@ -9,11 +9,12 @@ import type { Settings as SettingsT, Mode } from '../../shared/types';
 import { saveSettingsDirect } from '../hooks/useAgent';
 
 export function Settings({
-  c, settings, onClose,
+  c, settings, onClose, onTestNotify,
 }: {
   c: Palette;
   settings: SettingsT;
   onClose: () => void;
+  onTestNotify: () => void;
 }) {
   const [editingKey, setEditingKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState(settings.apiKey);
@@ -90,6 +91,24 @@ export function Settings({
             }}>edit</button>}
           />
         )}
+
+        <Section c={c}>notifications</Section>
+        <SettingRow c={c}
+          label="notify when done"
+          hint="ping me when the agent finishes or needs my input"
+          action={<Switch c={c} on={settings.notifyEnabled} onClick={() => {
+            const next = !settings.notifyEnabled;
+            update({ notifyEnabled: next, notifyDismissed: next ? settings.notifyDismissed : false });
+          }}/>}
+        />
+        <SettingRow c={c}
+          label="send a test notification"
+          action={<button onClick={onTestNotify} style={{
+            padding: '4px 8px', fontSize: 11, fontFamily: DODO_FONT, cursor: 'pointer',
+            background: c.surface, border: `1px solid ${c.border}`,
+            color: c.muted, borderRadius: 4,
+          }}>test</button>}
+        />
 
         <Section c={c}>behavior</Section>
         <SettingRow c={c}
