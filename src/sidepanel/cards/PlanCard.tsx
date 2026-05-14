@@ -3,11 +3,12 @@ import { Ic } from '../../shared/icons';
 import { PrimaryBtn, GhostBtn } from '../components/atoms';
 
 export function PlanCard({
-  c, sites, steps, onApprove, onEdit,
+  c, sites, steps, scriptSteps, onApprove, onEdit,
 }: {
   c: Palette;
   sites: string[];
   steps: string[];
+  scriptSteps?: number;
   onApprove?: () => void;
   onEdit?: () => void;
 }) {
@@ -19,6 +20,12 @@ export function PlanCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
         <Ic.List size={16} style={{ color: c.muted }}/>
         <span style={{ fontWeight: 600, fontSize: 13 }}>plan.draft</span>
+        {scriptSteps != null && (
+          <span style={{
+            marginLeft: 'auto', fontSize: 10.5, color: c.muted,
+            background: c.raised, borderRadius: 4, padding: '2px 6px',
+          }}>{scriptSteps}-step script</span>
+        )}
       </div>
       {sites.length > 0 && (
         <div style={{ borderTop: `1px solid ${c.border}`, paddingTop: 10, marginBottom: 12 }}>

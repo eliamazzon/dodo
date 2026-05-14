@@ -1,3 +1,4 @@
+// 'ask' requires user approval before each navigation; 'auto' runs fully autonomously; 'watch' observes without acting.
 export type Mode = 'ask' | 'auto' | 'watch';
 
 export type Settings = {
@@ -29,6 +30,41 @@ export const DEFAULT_SETTINGS: Settings = {
 export type Plan = {
   sites: string[];
   steps: string[];
+  script?: ScriptStep[];
+};
+
+export type ScriptTarget = {
+  text?: string;
+  aria?: string;
+  placeholder?: string;
+  role?: string;
+  type?: string;
+};
+
+export type ScriptStep =
+  | { action: 'navigate'; url: string; description?: string }
+  | { action: 'snapshot'; description?: string }
+  | { action: 'click'; target: ScriptTarget; description?: string }
+  | { action: 'type'; target: ScriptTarget; text: string; description?: string }
+  | { action: 'extract'; description?: string }
+  | { action: 'done'; summary: string };
+
+export type SnapshotElement = {
+  tag: string;
+  selector: string;
+  text?: string;
+  aria?: string;
+  placeholder?: string;
+  role?: string;
+  type?: string;
+  value?: string;
+  href?: string;
+};
+
+export type SnapshotResult = {
+  title: string;
+  url: string;
+  elements: SnapshotElement[];
 };
 
 export type ToolName = 'navigate' | 'screenshot' | 'snapshot' | 'click' | 'type' | 'extract' | 'done';
@@ -47,6 +83,11 @@ export type ToolCallRecord = {
   thumb?: string;
 };
 
+/**
+ * State machine:
+ * idle → planning → awaiting_approval → working → complete | error
+ *                                         └→ awaiting_permission → working | error
+ */
 export type AgentPhase =
   | 'idle'
   | 'planning'
@@ -85,14 +126,31 @@ export const INITIAL_AGENT_STATE: AgentState = {
   toolCalls: [],
 };
 
+// 'paused' and 'watch' are legacy values kept for backwards-compatible history reads.
+export type HistoryStatus = 'running' | 'done' | 'error' | 'stopped' | 'paused' | 'watch';
+
+export type SavedConversationPart =
+  | { type: 'text'; text: string }
+  | { type: 'tool_call'; id: string; name: string; args: unknown; thoughtSignature?: string }
+  | { type: 'tool_result'; id: string; name: string; result: unknown; isError?: boolean }
+  | { type: 'image_omitted'; mimeType: string };
+
+export type SavedConversationMessage = {
+  role: 'user' | 'assistant' | 'tool';
+  parts: SavedConversationPart[];
+};
+
 export type HistoryItem = {
   id: string;
   startedAt: number;
+  endedAt?: number;
   title: string;
   sub: string;
-  status: 'done' | 'error' | 'paused' | 'watch';
+  status: HistoryStatus;
   steps: number;
   durationMs: number;
+  state?: AgentState;
+  conversation?: SavedConversationMessage[];
 };
 
 export type JsonSchemaProp = {

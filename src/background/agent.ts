@@ -1,21 +1,50 @@
+// Singleton agent that owns the state machine and Gemini conversation; one instance lives in the service worker process.
 import type {
-  AgentState, Plan, ToolCallRecord, ToolName, CompleteSummary, HistoryItem,
+  AgentState, Plan, ToolCallRecord, ToolName, CompleteSummary, HistoryItem, HistoryStatus,
+  SavedConversationMessage, SavedConversationPart, ScriptStep, SnapshotElement, SnapshotResult, ScriptTarget,
 } from '../shared/types';
 import { INITIAL_AGENT_STATE } from '../shared/types';
 import type { ChatMessage, ContentPart } from './providers/types';
 import { getProvider } from './providers';
 import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab } from './tools';
-import { getSettings, appendHistory, addAllowedHost } from './store';
+import { getSettings, upsertHistory, getHistoryItem, addAllowedHost } from './store';
 import { isHostAllowed } from './permissions';
 import { log } from './log';
 import { notify } from './notify';
 
 type Listener = (s: AgentState) => void;
 
-const PLAN_SYSTEM = `You are DODO, an open-source browser agent. The user will give you a task; you produce a short execution plan.
-Reply with ONLY a JSON object: {"sites": string[], "steps": string[]}.
-- sites: hosts (no scheme) the agent will need to touch, e.g. "docs.google.com".
-- steps: 2-6 imperative steps in lowercase, no numbering, no trailing periods.`;
+// Two separate system prompts because planning and execution have different output contracts:
+// planning must return strict JSON; execution must call tools (not emit free-form JSON).
+const PLAN_SYSTEM = `You are DODO, an open-source browser agent. The user will give you a task along with context about their current page, datetime, and location.
+
+Reply with ONLY a JSON object with keys:
+- "sites": string[] — hosts (no scheme) the agent will touch, e.g. "docs.google.com".
+- "steps": string[] — 2-6 human-readable imperative steps, lowercase, no numbering, no trailing periods.
+- "script": array of step objects — the exact action sequence to execute.
+
+Script step formats:
+  {"action":"navigate","url":"https://..."}
+  {"action":"snapshot"}
+  {"action":"click","target":{...},"description":"why"}
+  {"action":"type","target":{...},"text":"value"}
+  {"action":"extract"}
+  {"action":"done","summary":"what was accomplished"}
+
+Target objects describe the element with visible properties — never invent CSS selectors:
+  text: visible button/link label
+  aria: aria-label value
+  placeholder: input placeholder
+  role: ARIA role (button, link, textbox…)
+  type: HTML input type (email, text, search…)
+
+Rules:
+- After every navigate step, add a snapshot step before any click/type.
+- If the task starts on the current page shown in context, you may omit the first navigate and start with a snapshot.
+- Use at least one property per target; more is better.
+- Only navigate to hosts listed in "sites".
+- Script must end with a "done" step.
+- Use the datetime and location context to produce accurate results (locale-aware searches, correct regional sites, etc.).`;
 
 const EXEC_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser.
 
@@ -34,7 +63,59 @@ General flow:
 4. extract content when you need to read text.
 5. When the task is fully done, call done() with a summary and prioritized action items.
 
+IMPORTANT: You MUST always end every task by calling done() — even if your response is purely informational text. Never stop with a plain text message; always follow it with a done() call.
+
 Never invent URLs; only navigate to hosts that appear in the plan.`;
+
+async function getApproxLocation(): Promise<string> {
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 3000);
+    const r = await fetch('https://ipapi.co/json/', { signal: ctrl.signal });
+    clearTimeout(tid);
+    const d = await r.json() as Record<string, string>;
+    return [d.city, d.country_name].filter(Boolean).join(', ');
+  } catch { return ''; }
+}
+
+const RESOLVE_THRESHOLD = 5;
+
+function scoreElement(el: SnapshotElement, t: ScriptTarget): number {
+  let score = 0;
+  if (t.text) {
+    const elText = (el.text ?? '').toLowerCase();
+    const tText = t.text.toLowerCase();
+    if (elText === tText) score += 10;
+    else if (elText.includes(tText) || tText.includes(elText)) score += 5;
+  }
+  if (t.aria && el.aria) {
+    score += el.aria.toLowerCase() === t.aria.toLowerCase() ? 8
+           : el.aria.toLowerCase().includes(t.aria.toLowerCase()) ? 4 : 0;
+  }
+  if (t.placeholder && el.placeholder) {
+    score += el.placeholder.toLowerCase() === t.placeholder.toLowerCase() ? 8
+           : el.placeholder.toLowerCase().includes(t.placeholder.toLowerCase()) ? 4 : 0;
+  }
+  if (t.role && el.role && el.role.toLowerCase() === t.role.toLowerCase()) score += 3;
+  if (t.type && el.type && el.type.toLowerCase() === t.type.toLowerCase()) score += 3;
+  return score;
+}
+
+function isTypeable(el: SnapshotElement): boolean {
+  if (['input', 'textarea'].includes(el.tag)) return true;
+  if (el.role === 'textbox' || el.role === 'combobox' || el.role === 'searchbox') return true;
+  return false;
+}
+
+function resolveTarget(target: ScriptTarget, elements: SnapshotElement[], action: 'click' | 'type' = 'click'): string | null {
+  let best: { selector: string; score: number } | null = null;
+  for (const el of elements) {
+    if (action === 'type' && !isTypeable(el)) continue;
+    const score = scoreElement(el, target);
+    if (score > (best?.score ?? 0)) best = { selector: el.selector, score };
+  }
+  return best && best.score >= RESOLVE_THRESHOLD ? best.selector : null;
+}
 
 class Agent {
   state: AgentState = { ...INITIAL_AGENT_STATE };
@@ -42,6 +123,34 @@ class Agent {
   private aborted = false;
   private resolvePermission: ((allowed: boolean) => void) | null = null;
   private conversation: ChatMessage[] = [];
+  private taskId: string | null = null;
+
+  private async persistSnapshot(status: HistoryStatus, extras?: Partial<HistoryItem>) {
+    if (!this.taskId || !this.state.task) return;
+    const startedAt = this.state.startedAt ?? Date.now();
+    const item: HistoryItem = {
+      id: this.taskId,
+      startedAt,
+      endedAt: status === 'running' ? undefined : Date.now(),
+      title: this.state.task,
+      sub: (this.state.plan?.sites ?? []).join(', ') || 'no hosts',
+      status,
+      steps: this.state.toolCalls.length,
+      durationMs: Date.now() - startedAt,
+      state: {
+        ...this.state,
+        toolCalls: this.state.toolCalls.map((t) => ({ ...t, thumb: undefined })),
+      },
+      conversation: serializeConversation(this.conversation),
+      ...extras,
+    };
+    try {
+      await upsertHistory(item);
+    } catch (e) {
+      log.warn('persist history failed', e);
+    }
+  }
+
 
   subscribe(l: Listener): () => void {
     this.listeners.add(l);
@@ -68,9 +177,13 @@ class Agent {
   }
 
   async submit(task: string) {
-    log.info('submit', { task });
+    log.info('submit', { task, reusingId: !!this.taskId });
     this.aborted = false;
     this.conversation = [];
+    // Preserve an existing taskId (e.g. retry-from-history on a task that errored
+    // before any conversation existed) so we upsert the same history row instead
+    // of creating a duplicate. `reset()` clears taskId for true fresh-task flows.
+    if (!this.taskId) this.taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     this.setState({
       ...INITIAL_AGENT_STATE,
       phase: 'planning',
@@ -78,18 +191,7 @@ class Agent {
       workingLabel: 'drafting plan',
       startedAt: Date.now(),
     });
-
-    try {
-      const tab = await getActiveTab();
-      if (tab?.id != null) {
-        pinActiveTab(tab.id);
-        log.info('pinned tab', { tabId: tab.id, url: tab.url });
-      } else {
-        log.warn('no active tab found at submit');
-      }
-    } catch (e) {
-      log.warn('pin tab failed', e);
-    }
+    void this.persistSnapshot('running');
 
     const settings = await getSettings();
     const provider = getProvider(settings.providerId);
@@ -98,8 +200,41 @@ class Agent {
     }
 
     try {
+      pinActiveTab(null); // clear any stale pin before querying the real active tab
+      const tab = await getActiveTab();
+      if (tab?.id != null) {
+        pinActiveTab(tab.id);
+        log.info('pinned tab', { tabId: tab.id, url: tab.url });
+      } else {
+        log.warn('no active tab found at submit');
+      }
+
+      let pageContext = '';
+      if (tab?.id != null && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+        try {
+          const snap = await runContentOp(tab.id, { op: 'snapshot' });
+          if (snap.ok && snap.data) {
+            const data = snap.data as SnapshotResult;
+            const lines = (data.elements ?? []).slice(0, 60).map((e: SnapshotElement) =>
+              [e.tag, e.text ? `text="${e.text}"` : '', e.aria ? `aria="${e.aria}"` : '',
+               e.placeholder ? `ph="${e.placeholder}"` : '', e.role ? `role="${e.role}"` : '',
+               e.type ? `type="${e.type}"` : ''].filter(Boolean).join(' ')
+            );
+            pageContext = `URL: ${data.url ?? tab.url}\nTitle: ${data.title ?? tab.title ?? ''}\nElements:\n${lines.join('\n')}`;
+          }
+        } catch { /* best-effort */ }
+      }
+      if (!pageContext) pageContext = `URL: ${tab?.url ?? 'none'}\nTitle: ${tab?.title ?? ''}\nElements:\n(no snapshot available)`;
+
+      const now = new Date();
+      const datetime = now.toISOString();
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const location = await getApproxLocation();
+
+      const contextBlock = `TASK: ${task}\n\nCURRENT PAGE:\n${pageContext}\n\nCONTEXT:\nDatetime: ${datetime}\nTimezone: ${timezone}\nLocation: ${location || '(unknown)'}`;
+
       const planMessages: ChatMessage[] = [
-        { role: 'user', parts: [{ type: 'text', text: task }] },
+        { role: 'user', parts: [{ type: 'text', text: contextBlock }] },
       ];
       log.info('plan request', { provider: provider.id, model: settings.model });
       const planRes = await provider.chat({
@@ -118,6 +253,7 @@ class Agent {
       }
       log.info('plan ready', plan);
       this.setState({ phase: 'awaiting_approval', plan, workingLabel: 'drafted plan' });
+      void this.persistSnapshot('running');
     } catch (e) {
       log.err('submit failed', e);
       return this.fail(e instanceof Error ? e.message : String(e));
@@ -132,36 +268,72 @@ class Agent {
     }
     log.info('continue', { text });
     this.aborted = false;
-    this.conversation.push({ role: 'user', parts: [{ type: 'text', text }] });
+
+    const tab = await getActiveTab().catch(() => null);
+    const datetime = new Date().toISOString();
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    let snapshotLines = '(no snapshot available)';
+    if (tab?.id && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+      try {
+        const snap = await runContentOp(tab.id, { op: 'snapshot' });
+        if (snap.ok && snap.data) {
+          const data = snap.data as SnapshotResult;
+          snapshotLines = (data.elements ?? []).slice(0, 60).map((e: SnapshotElement) =>
+            [e.tag, e.text ? `text="${e.text}"` : '', e.aria ? `aria="${e.aria}"` : '',
+             e.placeholder ? `ph="${e.placeholder}"` : '', e.role ? `role="${e.role}"` : '',
+             e.type ? `type="${e.type}"` : ''].filter(Boolean).join(' ')
+          ).join('\n');
+        }
+      } catch { /* best-effort */ }
+    }
+
+    const enriched = `Current page: ${tab?.url ?? 'unknown'} — ${tab?.title ?? ''}\nDatetime: ${datetime} (${timezone})\nElements:\n${snapshotLines}\n\nFollow-up: ${text}`;
+
+    this.conversation.push({ role: 'user', parts: [{ type: 'text', text: enriched }] });
     this.setState({
       phase: 'working',
+      task: text,
       workingLabel: 'continuing',
       complete: undefined,
       errorMsg: undefined,
+      toolCalls: [],
     });
     await this.runLoop();
   }
 
   async approvePlan() {
     if (this.state.phase !== 'awaiting_approval' || !this.state.plan || !this.state.task) return;
-    log.info('plan approved — starting loop');
+    log.info('plan approved', { scriptMode: !!this.state.plan.script?.length });
     this.setState({ phase: 'working', workingLabel: 'starting' });
-    this.conversation = [
-      { role: 'user', parts: [{ type: 'text', text: this.state.task }] },
-      { role: 'assistant', parts: [{ type: 'text', text: JSON.stringify(this.state.plan) }] },
-      { role: 'user', parts: [{ type: 'text', text: 'plan approved. proceed.' }] },
-    ];
-    await this.runLoop();
+
+    if (this.state.plan.script?.length) {
+      await this.runScript([...this.state.plan.script]);
+    } else {
+      this.conversation = [
+        { role: 'user', parts: [{ type: 'text', text: this.state.task }] },
+        { role: 'assistant', parts: [{ type: 'text', text: JSON.stringify(this.state.plan) }] },
+        { role: 'user', parts: [{ type: 'text', text: 'plan approved. proceed.' }] },
+      ];
+      await this.runLoop();
+    }
   }
 
   stop() {
     log.info('stop');
     this.aborted = true;
-    this.conversation = [];
+    pinActiveTab(null);
     if (this.resolvePermission) {
       this.resolvePermission(false);
       this.resolvePermission = null;
     }
+    const wasRunning = this.taskId && this.state.task && this.state.phase !== 'idle'
+      && this.state.phase !== 'complete' && this.state.phase !== 'error';
+    if (wasRunning) {
+      void this.persistSnapshot('stopped');
+    }
+    this.conversation = [];
+    this.taskId = null;
     this.state = { ...INITIAL_AGENT_STATE };
     for (const l of this.listeners) l(this.state);
   }
@@ -176,6 +348,7 @@ class Agent {
     this.aborted = false;
     const last = this.conversation[this.conversation.length - 1];
     if (last.role !== 'user' && last.role !== 'tool') {
+      // Inject a recovery hint so the model tries a different approach instead of repeating the same failing call.
       this.conversation.push({
         role: 'user',
         parts: [{ type: 'text', text: 'continue from where you left off. if a tool call failed, try a different approach (e.g., call snapshot() to get fresh selectors).' }],
@@ -188,11 +361,45 @@ class Agent {
   reset() {
     this.aborted = true;
     this.conversation = [];
+    this.taskId = null;
     if (this.resolvePermission) {
       this.resolvePermission(false);
       this.resolvePermission = null;
     }
     this.state = { ...INITIAL_AGENT_STATE };
+    for (const l of this.listeners) l(this.state);
+  }
+
+  async openHistory(id: string) {
+    const item = await getHistoryItem(id);
+    if (!item || !item.state) {
+      log.warn('openHistory — no item or no saved state', id);
+      return;
+    }
+    log.info('openHistory', { id, status: item.status });
+    this.aborted = true;
+    if (this.resolvePermission) {
+      this.resolvePermission(false);
+      this.resolvePermission = null;
+    }
+    this.taskId = item.id;
+    this.conversation = deserializeConversation(item.conversation ?? []);
+    // restore state — but force terminal/pending phases that aren't safely resumable
+    // back to a viewable state. running/awaiting_permission saved from a prior session
+    // can't actually be resumed (the tab/permission promise is gone), so present them
+    // as error so the user can decide.
+    let restored: AgentState = { ...item.state };
+    if (restored.phase === 'planning' || restored.phase === 'working'
+        || restored.phase === 'awaiting_permission' || restored.phase === 'awaiting_approval') {
+      restored = {
+        ...restored,
+        phase: 'error',
+        errorMsg: restored.errorMsg ?? `task was ${item.status} — pick up with retry or send a new message`,
+        workingLabel: undefined,
+        pendingPermission: undefined,
+      };
+    }
+    this.state = restored;
     for (const l of this.listeners) l(this.state);
   }
 
@@ -222,10 +429,49 @@ class Agent {
     });
   }
 
+  private async doSnapshot(): Promise<SnapshotResult | null> {
+    const tab = await getActiveTab();
+    if (!tab?.id) return null;
+    const startedAt = Date.now();
+    const r = await runContentOp(tab.id, { op: 'snapshot' });
+    if (!r.ok || !r.data) return null;
+    const data = r.data as SnapshotResult;
+    this.pushToolCall({
+      id: `snapshot_${startedAt}`,
+      name: 'snapshot',
+      args: {},
+      status: 'ok',
+      startedAt,
+      endedAt: Date.now(),
+      label: 'inventory interactive elements',
+      detail: `${data.elements?.length ?? 0} elements`,
+    });
+    return data;
+  }
+
+  private async dispatchNavigate(url: string): Promise<void> {
+    const host = hostFromUrl(url);
+    if (!host) throw new Error('invalid url');
+    const allowed = await isHostAllowed(host);
+    if (!allowed) {
+      const ok = await this.waitForPermission(host, `agent wants to navigate to ${host}`);
+      if (!ok) throw new Error('permission_denied');
+    }
+    const tab = await getActiveTab();
+    if (!tab?.id) throw new Error('no active tab');
+    const startedAt = Date.now();
+    const recId = `navigate_${startedAt}`;
+    this.pushToolCall({ id: recId, name: 'navigate', args: { url }, status: 'pending', startedAt, label: `navigate to ${host}` });
+    await navigateTab(tab.id, url);
+    this.updateToolCall(recId, { status: 'ok', endedAt: Date.now() });
+  }
+
   private async runLoop() {
     const settings = await getSettings();
     const provider = getProvider(settings.providerId);
 
+    // 40-turn cap guards against runaway loops; the model should call done() long before this.
+    let emptyTurns = 0;
     for (let turn = 0; turn < 40 && !this.aborted; turn++) {
       log.info(`turn ${turn} → chat`, { messages: this.conversation.length });
       let res;
@@ -245,7 +491,11 @@ class Agent {
       if (res.kind === 'text') {
         log.info(`turn ${turn} ← text`, res.text.slice(0, 200));
         this.conversation.push({ role: 'assistant', parts: [{ type: 'text', text: res.text }] });
-        if (!res.text.trim()) return this.fail('model returned empty response');
+        if (!res.text.trim()) {
+          if (++emptyTurns >= 3) return this.fail('model returned empty response');
+          continue;
+        }
+        emptyTurns = 0;
         continue;
       }
 
@@ -329,6 +579,7 @@ class Agent {
       }
 
       this.conversation.push({ role: 'tool', parts: toolReplies });
+      void this.persistSnapshot('running');
 
       if (doneCall) {
         return this.complete({
@@ -341,6 +592,159 @@ class Agent {
     }
 
     if (!this.aborted) this.fail('exceeded max turns');
+  }
+
+  private async runScript(script: ScriptStep[]) {
+    let lastSnapshot: SnapshotResult | null = null;
+    let i = 0;
+    let recoveryAttempts = 0;
+
+    while (i < script.length && !this.aborted) {
+      const step = script[i];
+
+      // Auto-insert snapshot before any interaction when we don't have one
+      if ((step.action === 'click' || step.action === 'type') && !lastSnapshot) {
+        lastSnapshot = await this.doSnapshot();
+        if (!lastSnapshot) return this.fail('snapshot failed before interaction');
+        continue; // re-evaluate same step with fresh snapshot
+      }
+
+      try {
+        if (step.action === 'navigate') {
+          await this.dispatchNavigate(step.url);
+          lastSnapshot = null;
+          recoveryAttempts = 0;
+          i++;
+
+        } else if (step.action === 'snapshot') {
+          lastSnapshot = await this.doSnapshot();
+          if (!lastSnapshot) return this.fail('snapshot failed');
+          recoveryAttempts = 0;
+          i++;
+
+        } else if (step.action === 'click' || step.action === 'type') {
+          const selector = resolveTarget(step.target, lastSnapshot!.elements, step.action);
+          if (!selector) {
+            if (++recoveryAttempts > 3) return this.fail(`no element matched after ${recoveryAttempts - 1} recovery attempts: ${step.description ?? JSON.stringify(step.target)}`);
+            const repaired = await this.recoverScript(step, lastSnapshot!, script.slice(i));
+            if (!repaired) return this.fail(`no element matched: ${step.description ?? JSON.stringify(step.target)}`);
+            script = [...script.slice(0, i), ...repaired];
+            // keep lastSnapshot — the recovery LLM already used this snapshot's data,
+            // and nulling it would cause an infinite auto-insert loop if resolution fails again
+            continue;
+          }
+
+          const tab = await getActiveTab();
+          if (!tab?.id) return this.fail('no active tab');
+          const startedAt = Date.now();
+          const recId = `${step.action}_${startedAt}`;
+          this.pushToolCall({
+            id: recId, name: step.action, status: 'pending', startedAt,
+            args: step.action === 'type' ? { selector, text: step.text } : { selector },
+            label: step.action === 'type' ? `type into ${selector}` : `click ${selector}`,
+          });
+          this.setState({ workingLabel: step.description ?? (step.action === 'type' ? `type into ${selector}` : `click ${selector}`) });
+
+          const op = step.action === 'type'
+            ? await runContentOp(tab.id, { op: 'type', selector, text: step.text })
+            : await runContentOp(tab.id, { op: 'click', selector });
+
+          if (!op.ok) {
+            this.updateToolCall(recId, { status: 'error', endedAt: Date.now(), errorMsg: op.error });
+            if (++recoveryAttempts > 3) return this.fail(`action failed after ${recoveryAttempts - 1} recovery attempts: ${op.error}`);
+            const fresh = await this.doSnapshot();
+            const repaired = fresh ? await this.recoverScript(step, fresh, script.slice(i)) : null;
+            if (!repaired) return this.fail(op.error ?? 'action failed');
+            script = [...script.slice(0, i), ...repaired];
+            lastSnapshot = fresh;
+            continue;
+          }
+
+          this.updateToolCall(recId, { status: 'ok', endedAt: Date.now() });
+          lastSnapshot = null;
+          recoveryAttempts = 0;
+          i++;
+
+        } else if (step.action === 'extract') {
+          const tab = await getActiveTab();
+          if (tab?.id) {
+            const startedAt = Date.now();
+            const r = await runContentOp(tab.id, { op: 'extract' });
+            this.pushToolCall({
+              id: `extract_${startedAt}`, name: 'extract', args: {}, startedAt, endedAt: Date.now(),
+              status: r.ok ? 'ok' : 'error', label: 'read page',
+            });
+          }
+          i++;
+
+        } else if (step.action === 'done') {
+          return this.complete({
+            summary: step.summary,
+            actionItems: [],
+            durationMs: Date.now() - (this.state.startedAt ?? Date.now()),
+            steps: this.state.toolCalls.length,
+          });
+        } else {
+          i++; // skip unknown step types
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg === 'permission_denied') return this.fail('user denied permission');
+        if (++recoveryAttempts > 3) return this.fail(`step threw after ${recoveryAttempts - 1} recovery attempts: ${msg}`);
+        const fresh = await this.doSnapshot();
+        const repaired = fresh ? await this.recoverScript(step, fresh, script.slice(i)) : null;
+        if (!repaired) return this.fail(msg);
+        script = [...script.slice(0, i), ...repaired];
+        lastSnapshot = fresh;
+      }
+
+      void this.persistSnapshot('running');
+    }
+
+    if (!this.aborted) this.fail('script ended without done step');
+  }
+
+  private async recoverScript(
+    failedStep: ScriptStep,
+    snapshot: SnapshotResult,
+    remainingSteps: ScriptStep[],
+  ): Promise<ScriptStep[] | null> {
+    const settings = await getSettings();
+    const provider = getProvider(settings.providerId);
+
+    const elementSummary = (snapshot.elements ?? []).slice(0, 60).map((e) =>
+      [e.tag, e.selector, e.text ? `text="${e.text}"` : '', e.aria ? `aria="${e.aria}"` : '',
+       e.placeholder ? `ph="${e.placeholder}"` : '', e.role ? `role="${e.role}"` : '',
+       e.type ? `type="${e.type}"` : ''].filter(Boolean).join(' ')
+    ).join('\n');
+
+    const prompt = `You are repairing a browser automation script. A step failed because no element matched.
+
+FAILED STEP: ${JSON.stringify(failedStep)}
+
+CURRENT PAGE (${snapshot.url}):
+${elementSummary}
+
+REMAINING STEPS (must still be completed):
+${JSON.stringify(remainingSteps, null, 2)}
+
+Output ONLY a JSON array of script steps to replace the failed step and complete the remaining work.
+Use real text/aria/placeholder values visible in the snapshot above for targets.
+If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
+
+    try {
+      const res = await provider.chat({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        systemPrompt: 'You are a browser automation repair assistant. Output ONLY valid JSON — an array of script steps.',
+        messages: [{ role: 'user', parts: [{ type: 'text', text: prompt }] }],
+        tools: [],
+        jsonResponse: true,
+      });
+      if (res.kind !== 'text') return null;
+      const parsed = JSON.parse(res.text.trim());
+      return Array.isArray(parsed) ? (parsed as ScriptStep[]) : null;
+    } catch { return null; }
   }
 
   private async dispatch(name: ToolName, args: Record<string, unknown>): Promise<unknown> {
@@ -401,36 +805,18 @@ class Agent {
 
   private complete(c: CompleteSummary) {
     log.info('complete', { steps: c.steps, durationMs: c.durationMs, summary: c.summary.slice(0, 200) });
+    pinActiveTab(null);
     this.setState({ phase: 'complete', complete: c, workingLabel: undefined });
     notify('dodo · done', truncate(c.summary, 140) || `task complete · ${c.steps} actions`);
-    const item: HistoryItem = {
-      id: `${Date.now()}`,
-      startedAt: this.state.startedAt ?? Date.now(),
-      title: this.state.task ?? 'task',
-      sub: (this.state.plan?.sites ?? []).join(', ') || 'no hosts',
-      status: 'done',
-      steps: this.state.toolCalls.length,
-      durationMs: c.durationMs,
-    };
-    appendHistory(item).catch(() => undefined);
+    void this.persistSnapshot('done');
   }
 
   private fail(msg: string) {
     log.err('fail', msg);
+    pinActiveTab(null);
     this.setState({ phase: 'error', errorMsg: msg, workingLabel: undefined });
     notify('dodo · halted', truncate(msg, 140));
-    if (this.state.task) {
-      const item: HistoryItem = {
-        id: `${Date.now()}`,
-        startedAt: this.state.startedAt ?? Date.now(),
-        title: this.state.task,
-        sub: (this.state.plan?.sites ?? []).join(', ') || 'no hosts',
-        status: 'error',
-        steps: this.state.toolCalls.length,
-        durationMs: Date.now() - (this.state.startedAt ?? Date.now()),
-      };
-      appendHistory(item).catch(() => undefined);
-    }
+    if (this.state.task) void this.persistSnapshot('error');
   }
 }
 
@@ -449,6 +835,7 @@ function parsePlan(text: string): Plan | null {
       return {
         sites: Array.isArray(obj.sites) ? obj.sites.map(String) : [],
         steps: obj.steps.map(String),
+        script: Array.isArray(obj.script) && obj.script.length ? (obj.script as ScriptStep[]) : undefined,
       };
     }
   } catch {}
@@ -484,6 +871,32 @@ function sanitizeResult(name: ToolName, result: unknown): unknown {
     if (r?.text && r.text.length > 6000) return { text: r.text.slice(0, 6000) + '\n…[truncated]' };
   }
   return result;
+}
+
+function serializeConversation(messages: ChatMessage[]): SavedConversationMessage[] {
+  return messages.map((m) => ({
+    role: m.role,
+    parts: m.parts.map((p): SavedConversationPart => {
+      if (p.type === 'image') return { type: 'image_omitted', mimeType: p.mimeType };
+      if (p.type === 'tool_call') return { type: 'tool_call', id: p.id, name: p.name, args: p.args, thoughtSignature: p.thoughtSignature };
+      if (p.type === 'tool_result') return { type: 'tool_result', id: p.id, name: p.name, result: p.result, isError: p.isError };
+      return { type: 'text', text: p.text };
+    }),
+  }));
+}
+
+function deserializeConversation(messages: SavedConversationMessage[]): ChatMessage[] {
+  return messages.map((m) => ({
+    role: m.role,
+    parts: m.parts.flatMap((p): ContentPart[] => {
+      if (p.type === 'image_omitted') {
+        return [{ type: 'text', text: `[screenshot omitted from saved history · ${p.mimeType}]` }];
+      }
+      if (p.type === 'tool_call') return [{ type: 'tool_call', id: p.id, name: p.name, args: p.args, thoughtSignature: p.thoughtSignature }];
+      if (p.type === 'tool_result') return [{ type: 'tool_result', id: p.id, name: p.name, result: p.result, isError: p.isError }];
+      return [{ type: 'text', text: p.text }];
+    }),
+  }));
 }
 
 function sanitizeActionItems(raw: unknown): CompleteSummary['actionItems'] {

@@ -30,7 +30,7 @@ export function PlanApproval({
           <Ic.List size={16}/>
           <span style={{ fontSize: 13 }}>drafted plan</span>
         </div>
-        <PlanCard c={c} sites={plan.sites} steps={plan.steps} onApprove={onApprove} onEdit={onEdit}/>
+        <PlanCard c={c} sites={plan.sites} steps={plan.steps} scriptSteps={plan.script?.length} onApprove={onApprove} onEdit={onEdit}/>
       </Body>
     </PanelShell>
   );

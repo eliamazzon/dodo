@@ -53,23 +53,11 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   },
   {
     name: 'done',
-    description: 'Mark the task complete. Provide a short summary and a prioritized list of action items.',
+    description: 'Mark the task complete.',
     parameters: {
       type: 'object',
       properties: {
-        summary: { type: 'string', description: 'Plain-text summary of what was learned or done.' },
-        actionItems: {
-          type: 'array',
-          description: 'Prioritized list of follow-up actions.',
-          items: {
-            type: 'object',
-            properties: {
-              priority: { type: 'string', description: 'One of p0, p1, p2.', enum: ['p0', 'p1', 'p2'] },
-              text: { type: 'string', description: 'Action description.' },
-            },
-            required: ['priority', 'text'],
-          },
-        },
+        summary: { type: 'string', description: 'The actual result or answer — include extracted data, lists, findings, or a description of the action taken. Do NOT write a meta-description of what you did; write the result itself.' },
       },
       required: ['summary'],
     },
