@@ -1,4 +1,4 @@
-import { r as reactExports, j as jsxRuntimeExports, D as DODO_FONT, e as DODO_LIGHT, P as PanelShell, W as Wordmark, B as Body, G as GhostBtn, c as PrimaryBtn, g as DodoMark, I as Ic, f as createRoot } from './atoms-hwv2Q3ri.js';
+import { r as reactExports, j as jsxRuntimeExports, D as DODO_FONT, e as DODO_LIGHT, P as PanelShell, W as Wordmark, B as Body, G as GhostBtn, c as PrimaryBtn, g as DodoMark, I as Ic, f as createRoot } from './atoms-CUAwgaxC.js';
 import { G as GeminiProvider } from './gemini-n0K2crwM.js';
 import { D as DEFAULT_SETTINGS } from './types-C5_6h52x.js';
 
@@ -334,4 +334,4 @@ if (root) {
     /* @__PURE__ */ jsxRuntimeExports.jsx(reactExports.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Onboarding, {}) })
   );
 }
-//# sourceMappingURL=onboarding-Cg4x1vSX.js.map
+//# sourceMappingURL=onboarding-PBg3avwl.js.map

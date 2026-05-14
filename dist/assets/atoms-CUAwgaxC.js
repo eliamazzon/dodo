@@ -581,10 +581,6 @@ const Ic = {
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M14 11V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-1c-2 0-3-1-4-2l-3-4a1.5 1.5 0 0 1 2.4-1.7L8 13" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M8 11V8.5a1.5 1.5 0 0 0-3 0V13" })
   ] })),
-  Search: make(/* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "11", cy: "11", r: "6" }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("line", { x1: "20", y1: "20", x2: "15.5", y2: "15.5" })
-  ] })),
   Clock: make(/* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("circle", { cx: "12", cy: "12", r: "9" }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("polyline", { points: "12 7 12 12 15 14" })
@@ -877,4 +873,4 @@ function Toggle3({
 }
 
 export { Body as B, DODO_FONT as D, GhostBtn as G, Ic as I, NotifyBanner as N, PanelShell as P, Switch as S, Thumb as T, UserMsg as U, Wordmark as W, Disclaimer as a, WorkingLine as b, PrimaryBtn as c, Toggle3 as d, DODO_LIGHT as e, createRoot as f, DodoMark as g, jsxRuntimeExports as j, reactExports as r };
-//# sourceMappingURL=atoms-hwv2Q3ri.js.map
+//# sourceMappingURL=atoms-CUAwgaxC.js.map

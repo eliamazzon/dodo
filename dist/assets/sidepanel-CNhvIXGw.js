@@ -1,4 +1,4 @@
-import { r as reactExports, j as jsxRuntimeExports, I as Ic, D as DODO_FONT, P as PanelShell, B as Body, W as Wordmark, a as Disclaimer, U as UserMsg, b as WorkingLine, c as PrimaryBtn, G as GhostBtn, T as Thumb, N as NotifyBanner, d as Toggle3, S as Switch, e as DODO_LIGHT, f as createRoot } from './atoms-hwv2Q3ri.js';
+import { r as reactExports, j as jsxRuntimeExports, I as Ic, D as DODO_FONT, P as PanelShell, B as Body, W as Wordmark, a as Disclaimer, U as UserMsg, b as WorkingLine, c as PrimaryBtn, G as GhostBtn, T as Thumb, N as NotifyBanner, S as Switch, d as Toggle3, e as DODO_LIGHT, f as createRoot } from './atoms-CUAwgaxC.js';
 import { D as DEFAULT_SETTINGS, I as INITIAL_AGENT_STATE } from './types-C5_6h52x.js';
 import { P as PORT_NAME } from './messages-DSwU0c21.js';
 
@@ -86,7 +86,9 @@ function useAgent() {
     retry: () => send({ kind: "retry" }),
     reset: () => send({ kind: "reset" }),
     setMode: (mode) => send({ kind: "set_mode", mode }),
-    testNotify: () => send({ kind: "test_notify" })
+    testNotify: () => send({ kind: "test_notify" }),
+    openHistory: (id) => send({ kind: "open_history", id }),
+    deleteHistory: (id) => send({ kind: "delete_history", id })
   };
 }
 async function saveSettingsDirect(patch) {
@@ -499,6 +501,7 @@ function PlanCard({
   c,
   sites,
   steps,
+  scriptSteps,
   onApprove,
   onEdit
 }) {
@@ -510,7 +513,18 @@ function PlanCard({
   }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(Ic.List, { size: 16, style: { color: c.muted } }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: 13 }, children: "plan.draft" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: 13 }, children: "plan.draft" }),
+      scriptSteps != null && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+        marginLeft: "auto",
+        fontSize: 10.5,
+        color: c.muted,
+        background: c.raised,
+        borderRadius: 4,
+        padding: "2px 6px"
+      }, children: [
+        scriptSteps,
+        "-step script"
+      ] })
     ] }),
     sites.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { borderTop: `1px solid ${c.border}`, paddingTop: 10, marginBottom: 12 }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: c.muted, marginBottom: 6 }, children: "# allowed hosts" }),
@@ -565,7 +579,7 @@ function PlanApproval({
         /* @__PURE__ */ jsxRuntimeExports.jsx(Ic.List, { size: 16 }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13 }, children: "drafted plan" })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(PlanCard, { c, sites: plan.sites, steps: plan.steps, onApprove, onEdit })
+      /* @__PURE__ */ jsxRuntimeExports.jsx(PlanCard, { c, sites: plan.sites, steps: plan.steps, scriptSteps: plan.script?.length, onApprove, onEdit })
     ] })
   ] });
 }
@@ -881,6 +895,85 @@ function ErrorState({
   ] });
 }
 
+const linkStyle = {
+  color: "inherit",
+  textDecoration: "underline",
+  textUnderlineOffset: 2,
+  wordBreak: "break-all",
+  cursor: "pointer"
+};
+function openUrl(url) {
+  chrome.tabs.create({ url });
+}
+function renderInline(text) {
+  const parts = [];
+  const re = /\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s]+)/g;
+  let last = 0;
+  let m;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[1] != null) {
+      parts.push(/* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: m[1] }, key++));
+    } else if (m[2] != null) {
+      const url = m[3];
+      parts.push(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("a", { style: linkStyle, onClick: () => openUrl(url), children: m[2] }, key++)
+      );
+    } else {
+      const url = m[4];
+      parts.push(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("a", { style: linkStyle, onClick: () => openUrl(url), children: url }, key++)
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+function Markdown({ text, style }) {
+  const lines = text.split("\n");
+  const nodes = [];
+  let listItems = [];
+  let listType = null;
+  let listKey = 0;
+  const flushList = () => {
+    if (!listItems.length) return;
+    const Tag = listType;
+    nodes.push(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Tag, { style: { margin: "4px 0", paddingLeft: 20 }, children: listItems }, `list-${listKey++}`)
+    );
+    listItems = [];
+    listType = null;
+  };
+  lines.forEach((line, i) => {
+    const olMatch = line.match(/^(\d+)\.\s+(.*)/);
+    const ulMatch = line.match(/^[-*]\s+(.*)/);
+    if (olMatch) {
+      if (listType !== "ol") {
+        flushList();
+        listType = "ol";
+      }
+      listItems.push(/* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: renderInline(olMatch[2]) }, i));
+    } else if (ulMatch) {
+      if (listType !== "ul") {
+        flushList();
+        listType = "ul";
+      }
+      listItems.push(/* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: renderInline(ulMatch[1]) }, i));
+    } else {
+      flushList();
+      if (line.trim()) {
+        nodes.push(/* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: "4px 0" }, children: renderInline(line) }, i));
+      } else if (i > 0) {
+        nodes.push(/* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: 6 } }, i));
+      }
+    }
+  });
+  flushList();
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style, children: nodes });
+}
+
 function Complete({
   c,
   task,
@@ -895,7 +988,6 @@ function Complete({
   onOpenHistory
 }) {
   const dur = formatDuration(complete.durationMs);
-  const priColor = { p0: c.error, p1: c.warn, p2: c.muted };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(PanelShell, { c, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(PanelHeader, { c, model, onNewTask, onSettings: onOpenSettings, onHistory: onOpenHistory }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs(Body, { c, children: [
@@ -919,28 +1011,7 @@ function Complete({
         marginBottom: 10
       }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: c.muted, marginBottom: 8 }, children: "# summary" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, lineHeight: 1.55, color: c.ink, whiteSpace: "pre-wrap" }, children: complete.summary })
-      ] }),
-      complete.actionItems.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-        padding: "12px 14px",
-        border: `1px solid ${c.border}`,
-        background: c.surface2,
-        borderRadius: 8
-      }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: c.muted, marginBottom: 8 }, children: "# action items" }),
-        complete.actionItems.map((it, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "4px 0", fontSize: 12.5 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-            fontSize: 10,
-            padding: "1px 6px",
-            borderRadius: 2,
-            background: c.bg,
-            border: `1px solid ${c.border}`,
-            color: priColor[it.priority],
-            flexShrink: 0,
-            marginTop: 2
-          }, children: it.priority }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: c.ink, lineHeight: 1.45 }, children: it.text })
-        ] }, i))
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Markdown, { text: complete.summary, style: { fontSize: 13, lineHeight: 1.55, color: c.ink } })
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(Composer, { c, placeholder: "ask a follow-up…", mode, onChangeMode, onSubmit }),
@@ -974,7 +1045,8 @@ function SettingRow({
 function Settings({
   c,
   settings,
-  onClose
+  onClose,
+  onTestNotify
 }) {
   const [editingKey, setEditingKey] = reactExports.useState(false);
   const [keyDraft, setKeyDraft] = reactExports.useState(settings.apiKey);
@@ -1097,6 +1169,36 @@ function Settings({
           }, children: "edit" })
         }
       ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Section, { c, children: "notifications" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        SettingRow,
+        {
+          c,
+          label: "notify when done",
+          hint: "ping me when the agent finishes or needs my input",
+          action: /* @__PURE__ */ jsxRuntimeExports.jsx(Switch, { c, on: settings.notifyEnabled, onClick: () => {
+            const next = !settings.notifyEnabled;
+            update({ notifyEnabled: next, notifyDismissed: next ? settings.notifyDismissed : false });
+          } })
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        SettingRow,
+        {
+          c,
+          label: "send a test notification",
+          action: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onTestNotify, style: {
+            padding: "4px 8px",
+            fontSize: 11,
+            fontFamily: DODO_FONT,
+            cursor: "pointer",
+            background: c.surface,
+            border: `1px solid ${c.border}`,
+            color: c.muted,
+            borderRadius: 4
+          }, children: "test" })
+        }
+      ),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Section, { c, children: "behavior" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         SettingRow,
@@ -1152,24 +1254,24 @@ function Section({ c, children }) {
   }, children });
 }
 
-const FILTERS = ["all", "done", "error", "watching"];
+const FILTERS = ["all", "running", "done", "error", "stopped"];
 function History({
   c,
   items,
-  onClose
+  onClose,
+  onOpen,
+  onDelete
 }) {
   const [filter, setFilter] = reactExports.useState("all");
   const statusColor = {
+    running: c.accent,
     done: c.success,
     paused: c.warn,
     error: c.error,
+    stopped: c.muted,
     watch: c.accent
   };
-  const filtered = items.filter((it) => {
-    if (filter === "all") return true;
-    if (filter === "watching") return it.status === "watch";
-    return it.status === filter;
-  });
+  const filtered = items.filter((it) => filter === "all" ? true : it.status === filter);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(PanelShell, { c, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       padding: "10px 14px",
@@ -1192,8 +1294,7 @@ function History({
       /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10.5, color: c.muted }, children: [
         items.length,
         " tasks"
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(IcoBtn, { c, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Ic.Search, { size: 14 }) })
+      ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
       padding: "6px 14px",
@@ -1222,23 +1323,78 @@ function History({
     }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs(Body, { c, pad: "0", children: [
       filtered.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 24, fontSize: 12, color: c.subtle, textAlign: "center" }, children: "no tasks yet." }),
-      filtered.map((it) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      filtered.map((it) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        Row,
+        {
+          c,
+          it,
+          statusColor: statusColor[it.status],
+          onOpen: () => onOpen(it.id),
+          onDelete: () => onDelete(it.id)
+        },
+        it.id
+      ))
+    ] })
+  ] });
+}
+function Row({
+  c,
+  it,
+  statusColor,
+  onOpen,
+  onDelete
+}) {
+  const [hover, setHover] = reactExports.useState(false);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      onMouseEnter: () => setHover(true),
+      onMouseLeave: () => setHover(false),
+      onClick: onOpen,
+      style: {
         padding: "12px 16px",
         borderBottom: `1px solid ${c.border}`,
         display: "flex",
         flexDirection: "column",
-        gap: 4
-      }, children: [
+        gap: 4,
+        cursor: "pointer",
+        background: hover ? c.surface : "transparent"
+      },
+      children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
             width: 6,
             height: 6,
             borderRadius: 1,
-            background: statusColor[it.status],
+            background: statusColor,
             flexShrink: 0
           } }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12.5, color: c.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: it.title }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10.5, color: c.subtle, flexShrink: 0 }, children: relTime(it.startedAt) })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10.5, color: c.subtle, flexShrink: 0 }, children: relTime(it.startedAt) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onDelete();
+              },
+              style: {
+                background: "transparent",
+                border: "none",
+                padding: 2,
+                cursor: "pointer",
+                color: c.subtle,
+                opacity: hover ? 1 : 0,
+                transition: "opacity 0.15s",
+                display: "inline-flex",
+                alignItems: "center"
+              },
+              "aria-label": "delete",
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx(Ic.X, { size: 12 })
+            }
+          )
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
           display: "flex",
@@ -1254,11 +1410,11 @@ function History({
             " steps"
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { flex: 1 } }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: statusColor[it.status] }, children: it.status })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: statusColor }, children: it.status })
         ] })
-      ] }, it.id))
-    ] })
-  ] });
+      ]
+    }
+  );
 }
 function relTime(ts) {
   const diff = Date.now() - ts;
@@ -1279,10 +1435,22 @@ function App() {
   const a = useAgent();
   const { snap } = a;
   if (view === "settings") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { c, settings: snap.settings, onClose: () => setView("agent") });
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { c, settings: snap.settings, onClose: () => setView("agent"), onTestNotify: a.testNotify });
   }
   if (view === "history") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx(History, { c, items: snap.history, onClose: () => setView("agent") });
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      History,
+      {
+        c,
+        items: snap.history,
+        onClose: () => setView("agent"),
+        onOpen: (id) => {
+          a.openHistory(id);
+          setView("agent");
+        },
+        onDelete: (id) => a.deleteHistory(id)
+      }
+    );
   }
   const common = {
     model: snap.settings.model,
@@ -1394,4 +1562,4 @@ if (root) {
     /* @__PURE__ */ jsxRuntimeExports.jsx(reactExports.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
   );
 }
-//# sourceMappingURL=sidepanel-D-t2oHmv.js.map
+//# sourceMappingURL=sidepanel-CNhvIXGw.js.map
