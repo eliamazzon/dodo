@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Palette } from '../../shared/tokens';
 import { DODO_FONT } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
@@ -47,9 +47,18 @@ export function Composer({
   const q = slashOpen ? value.slice(1).toLowerCase() : '';
   const shownCommands = slashOpen ? COMMANDS.filter(([k]) => k.slice(1).startsWith(q)) : COMMANDS;
 
+  const MAX_HEIGHT = 13 * 1.5 * 4; // 4 lines
+
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = '0px';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
 
   const submit = () => {
     const t = value.trim();
@@ -113,8 +122,9 @@ export function Composer({
           style={{
             width: '100%', resize: 'none', border: 'none', outline: 'none',
             background: 'transparent', fontFamily: DODO_FONT, fontSize: 13,
-            color: slashOpen ? c.accent : c.ink, padding: 0, minHeight: 18,
-            lineHeight: 1.5, opacity: state === 'working' ? 0.55 : 1,
+            color: slashOpen ? c.accent : c.ink, padding: 0,
+            lineHeight: 1.5, maxHeight: MAX_HEIGHT, overflowY: 'auto',
+            opacity: state === 'working' ? 0.55 : 1,
           }}
         />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>

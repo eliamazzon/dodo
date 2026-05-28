@@ -2,7 +2,7 @@ import type { Palette } from '../../shared/tokens';
 import { DODO_FONT } from '../../shared/tokens';
 import { Wordmark } from '../../shared/icons';
 import { PanelShell, Body } from '../components/PanelShell';
-import { PanelHeader } from '../components/PanelHeader';
+import { PanelHeader, type ModelOption } from '../components/PanelHeader';
 import { Composer } from '../components/Composer';
 import { Disclaimer } from '../components/atoms';
 import type { Mode } from '../../shared/types';
@@ -15,11 +15,15 @@ const SAMPLES = [
 ];
 
 export function Empty({
-  c, mode, model, onSubmit, onChangeMode, onNewTask, onOpenSettings, onOpenHistory,
+  c, mode, model, providerId, availableModels, onSelectModel,
+  onSubmit, onChangeMode, onNewTask, onOpenSettings, onOpenHistory,
 }: {
   c: Palette;
   mode: Mode;
   model: string;
+  providerId: string;
+  availableModels: ModelOption[];
+  onSelectModel: (id: string) => void;
   onSubmit: (text: string) => void;
   onChangeMode: (m: Mode) => void;
   onNewTask: () => void;
@@ -28,7 +32,16 @@ export function Empty({
 }) {
   return (
     <PanelShell c={c}>
-      <PanelHeader c={c} model={model} onNewTask={onNewTask} onSettings={onOpenSettings} onHistory={onOpenHistory}/>
+      <PanelHeader
+        c={c}
+        model={model}
+        provider={providerId}
+        availableModels={availableModels}
+        onSelectModel={onSelectModel}
+        onNewTask={onNewTask}
+        onSettings={onOpenSettings}
+        onHistory={onOpenHistory}
+      />
       <Body c={c} pad="0">
         <div style={{
           flex: 1, display: 'flex', flexDirection: 'column',

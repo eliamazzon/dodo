@@ -156,7 +156,7 @@ function Provider({
           </span>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>google · gemini</div>
-            <div style={{ fontSize: 10.5, color: c.muted, marginTop: 2 }}>gemini-3.1-flash-lite · bring your own api key</div>
+            <div style={{ fontSize: 10.5, color: c.muted, marginTop: 2 }}>gemini-3-flash-preview · bring your own api key</div>
           </div>
         </div>
         <div style={{

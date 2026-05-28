@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode } from '../../shared/types';
+import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type ApprovalMode } from '../../shared/types';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../../shared/messages';
 
 export type AgentSnapshot = {
@@ -81,16 +81,16 @@ export function useAgent() {
 
   return {
     snap,
-    submit: (task: string) => send({ kind: 'submit_task', task }),
-    continueChat: (text: string) => send({ kind: 'continue_chat', text }),
-    approve: () => send({ kind: 'approve_plan' }),
-    editPlan: () => send({ kind: 'edit_plan' }),
+    sendMessage: (text: string) => send({ kind: 'send_message', text }),
+    approveExecution: (messageId: string) => send({ kind: 'approve_execution', messageId }),
+    rejectExecution: (messageId: string) => send({ kind: 'reject_execution', messageId }),
     stop: () => send({ kind: 'stop' }),
     allow: (host: string, remember: boolean) => send({ kind: 'allow_host', host, remember }),
     deny: () => send({ kind: 'deny_permission' }),
     retry: () => send({ kind: 'retry' }),
     reset: () => send({ kind: 'reset' }),
     setMode: (mode: Mode) => send({ kind: 'set_mode', mode }),
+    setApprovalMode: (mode: ApprovalMode) => send({ kind: 'set_approval_mode', mode }),
     testNotify: () => send({ kind: 'test_notify' }),
     openHistory: (id: string) => send({ kind: 'open_history', id }),
     deleteHistory: (id: string) => send({ kind: 'delete_history', id }),

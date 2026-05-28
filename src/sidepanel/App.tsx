@@ -2,14 +2,10 @@ import { useState } from 'react';
 import { DODO_LIGHT } from '../shared/tokens';
 import { useAgent, saveSettingsDirect } from './hooks/useAgent';
 import { Empty } from './screens/Empty';
-import { PlanCreating } from './screens/PlanCreating';
-import { PlanApproval } from './screens/PlanApproval';
-import { Working } from './screens/Working';
-import { Permissions } from './screens/Permissions';
-import { ErrorState } from './screens/ErrorState';
-import { Complete } from './screens/Complete';
+import { Chat } from './screens/Chat';
 import { Settings } from './screens/Settings';
 import { History } from './screens/History';
+import { getProvider } from '../background/providers';
 
 type View = 'agent' | 'settings' | 'history';
 
@@ -34,9 +30,13 @@ export function App() {
     );
   }
 
+  const provider = getProvider(snap.settings.providerId);
   const common = {
     model: snap.settings.model,
     mode: snap.settings.defaultMode,
+    providerId: snap.settings.providerId,
+    availableModels: provider.availableModels,
+    onSelectModel: (id: string) => { void saveSettingsDirect({ model: id }); },
     onChangeMode: a.setMode,
     onNewTask: a.reset,
     onOpenSettings: () => setView('settings'),
@@ -44,74 +44,42 @@ export function App() {
   };
 
   const phase = snap.state.phase;
-  const task = snap.state.task ?? '';
+  const showEmpty = phase === 'idle' && snap.state.messages.length === 0;
 
-  if (phase === 'idle') {
-    return <Empty c={c} {...common} onSubmit={a.submit}/>;
+  if (showEmpty) {
+    return <Empty c={c} {...common} onSubmit={a.sendMessage}/>;
   }
-  if (phase === 'planning') {
-    return <PlanCreating c={c} task={task} {...common} onStop={a.stop}/>;
-  }
-  if (phase === 'awaiting_approval' && snap.state.plan) {
-    return (
-      <PlanApproval
-        c={c} task={task} model={common.model} plan={snap.state.plan}
-        onApprove={a.approve} onEdit={a.editPlan}
-        onNewTask={common.onNewTask}
-        onOpenSettings={common.onOpenSettings} onOpenHistory={common.onOpenHistory}
-      />
-    );
-  }
-  if (phase === 'awaiting_permission' && snap.state.pendingPermission) {
-    return (
-      <Permissions
-        c={c} task={task} model={common.model}
-        pending={snap.state.pendingPermission}
-        onAllow={() => a.allow(snap.state.pendingPermission!.host, true)}
-        onAllowOnce={() => a.allow(snap.state.pendingPermission!.host, false)}
-        onDeny={a.deny}
-        onNewTask={common.onNewTask}
-        onOpenSettings={common.onOpenSettings} onOpenHistory={common.onOpenHistory}
-      />
-    );
-  }
-  if (phase === 'working') {
-    const showBanner = !snap.settings.notifyEnabled && !snap.settings.notifyDismissed;
-    return (
-      <Working
-        c={c} task={task} {...common}
-        calls={snap.state.toolCalls}
-        workingLabel={snap.state.workingLabel}
-        startedAt={snap.state.startedAt}
-        notifyEnabled={!showBanner}
-        onEnableNotify={() => {
-          void saveSettingsDirect({ notifyEnabled: true });
-          a.testNotify();
-        }}
-        onDismissNotify={() => { void saveSettingsDirect({ notifyDismissed: true }); }}
-        onStop={a.stop} onSubmit={a.submit}
-      />
-    );
-  }
-  if (phase === 'error') {
-    return (
-      <ErrorState
-        c={c} task={task} {...common}
-        calls={snap.state.toolCalls}
-        errorMsg={snap.state.errorMsg ?? 'unknown error'}
-        onRetry={a.retry} onReset={a.reset} onSubmit={a.submit}
-      />
-    );
-  }
-  if (phase === 'complete' && snap.state.complete) {
-    return (
-      <Complete
-        c={c} task={task} {...common}
-        complete={snap.state.complete}
-        steps={snap.state.toolCalls.length}
-        onSubmit={a.continueChat}
-      />
-    );
-  }
-  return <Empty c={c} {...common} onSubmit={a.submit}/>;
+
+  const pending = snap.state.pendingPermission;
+  const showNotifyBanner = !snap.settings.notifyEnabled && !snap.settings.notifyDismissed;
+
+  return (
+    <Chat
+      c={c}
+      state={snap.state}
+      mode={common.mode}
+      model={common.model}
+      providerId={common.providerId}
+      availableModels={common.availableModels}
+      onSelectModel={common.onSelectModel}
+      onSendMessage={a.sendMessage}
+      onApproveExecution={a.approveExecution}
+      onRejectExecution={a.rejectExecution}
+      onAllow={() => pending && a.allow(pending.host, true)}
+      onAllowOnce={() => pending && a.allow(pending.host, false)}
+      onDeny={a.deny}
+      onStop={a.stop}
+      onRetry={a.retry}
+      onChangeMode={a.setMode}
+      onNewTask={common.onNewTask}
+      onOpenSettings={common.onOpenSettings}
+      onOpenHistory={common.onOpenHistory}
+      showNotifyBanner={showNotifyBanner}
+      onEnableNotify={() => {
+        void saveSettingsDirect({ notifyEnabled: true });
+        a.testNotify();
+      }}
+      onDismissNotify={() => { void saveSettingsDirect({ notifyDismissed: true }); }}
+    />
+  );
 }

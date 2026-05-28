@@ -5,8 +5,9 @@ import { Ic } from '../../shared/icons';
 import { PanelShell, Body } from '../components/PanelShell';
 import { Switch, Toggle3 } from '../components/atoms';
 import { SettingRow } from '../cards/SettingRow';
-import type { Settings as SettingsT, Mode } from '../../shared/types';
+import type { Settings as SettingsT, Mode, ApprovalMode } from '../../shared/types';
 import { saveSettingsDirect } from '../hooks/useAgent';
+import { getProvider } from '../../background/providers';
 
 export function Settings({
   c, settings, onClose, onTestNotify,
@@ -18,6 +19,9 @@ export function Settings({
 }) {
   const [editingKey, setEditingKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState(settings.apiKey);
+  const [pickingModel, setPickingModel] = useState(false);
+
+  const provider = getProvider(settings.providerId);
 
   const update = (patch: Partial<SettingsT>) => { void saveSettingsDirect(patch); };
 
@@ -46,11 +50,46 @@ export function Settings({
           value="google · gemini api"
           action={<Ic.Chevron size={13} style={{ color: c.muted, transform: 'rotate(-90deg)' }}/>}
         />
-        <SettingRow c={c}
-          label="default model"
-          value={settings.model}
-          action={<Ic.Chevron size={13} style={{ color: c.muted, transform: 'rotate(-90deg)' }}/>}
-        />
+        {pickingModel ? (
+          <div style={{ padding: '12px 16px', borderBottom: `1px solid ${c.border}` }}>
+            <div style={{ fontSize: 12.5, color: c.ink, marginBottom: 8 }}>default model</div>
+            {provider.availableModels.map((m) => (
+              <div
+                key={m.id}
+                onClick={() => { update({ model: m.id }); setPickingModel(false); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 10px', marginBottom: 4, borderRadius: 5, cursor: 'pointer',
+                  background: m.id === settings.model ? c.accentBg : c.surface2,
+                  border: `1px solid ${m.id === settings.model ? c.accent : c.border}`,
+                  fontSize: 12,
+                }}
+              >
+                <span style={{
+                  width: 10, height: 10, borderRadius: 5,
+                  background: m.id === settings.model ? c.accent : 'transparent',
+                  border: `1.5px solid ${m.id === settings.model ? c.accent : c.muted}`,
+                  flexShrink: 0,
+                }}/>
+                <span style={{ flex: 1, color: c.ink }}>{m.label}</span>
+              </div>
+            ))}
+            <button onClick={() => setPickingModel(false)} style={{
+              marginTop: 4, padding: '5px 10px', borderRadius: 4, border: `1px solid ${c.border}`,
+              background: 'transparent', color: c.muted, fontFamily: DODO_FONT, fontSize: 11, cursor: 'pointer',
+            }}>cancel</button>
+          </div>
+        ) : (
+          <SettingRow c={c}
+            label="default model"
+            value={settings.model}
+            action={<button onClick={() => setPickingModel(true)} style={{
+              padding: '4px 8px', fontSize: 11, fontFamily: DODO_FONT, cursor: 'pointer',
+              background: c.surface, border: `1px solid ${c.border}`,
+              color: c.muted, borderRadius: 4,
+            }}>change</button>}
+          />
+        )}
 
         <Section c={c}>byok</Section>
         {editingKey ? (
@@ -118,6 +157,16 @@ export function Settings({
             value={settings.defaultMode}
             options={['ask','auto','watch']}
             onChange={(v) => update({ defaultMode: v as Mode })}
+          />}
+        />
+        <SettingRow c={c}
+          label="script approval"
+          hint="ask before running plan_actions scripts, or auto-accept"
+          action={<Toggle3
+            c={c}
+            value={settings.approvalMode === 'always_ask' ? 'ask' : 'auto'}
+            options={['ask','auto']}
+            onChange={(v) => update({ approvalMode: (v === 'ask' ? 'always_ask' : 'auto_accept') as ApprovalMode })}
           />}
         />
         <SettingRow c={c}
