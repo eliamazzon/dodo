@@ -61,9 +61,10 @@ function toGeminiContents(messages: ChatMessage[]): GeminiContent[] {
 export const GeminiProvider: ModelProvider = {
   id: 'gemini',
   label: 'google · gemini api',
-  defaultModel: 'gemini-3.1-flash-lite',
+  defaultModel: 'gemini-3-flash-preview',
   availableModels: [
-    { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite' },
+    { id: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview' },
+    { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (cheaper)' },
   ],
 
   async verifyKey(apiKey: string) {

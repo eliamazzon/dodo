@@ -1,10 +1,60 @@
 import type { ToolSchema } from '../shared/types';
 import type { ContentOp, ContentResult } from '../shared/messages';
 
+// Targets are described by visible properties (text/aria/placeholder/role/type), not CSS selectors —
+// selectors are resolved at execution time against a fresh snapshot.
+const SCRIPT_STEP_SCHEMA = {
+  type: 'object',
+  description:
+    'A single step. Shape depends on `action`: ' +
+    '{action:"navigate",url}; ' +
+    '{action:"snapshot"}; ' +
+    '{action:"click",target:{text?,aria?,placeholder?,role?,type?},description?}; ' +
+    '{action:"type",target:{...},text}; ' +
+    '{action:"extract"}.',
+  properties: {
+    action: {
+      type: 'string',
+      enum: ['navigate', 'snapshot', 'click', 'type', 'extract'],
+      description: 'Step kind.',
+    },
+    url: { type: 'string', description: 'For navigate steps only.' },
+    target: {
+      type: 'object',
+      description: 'For click/type steps. Use visible properties — never CSS selectors.',
+      properties: {
+        text: { type: 'string' },
+        aria: { type: 'string' },
+        placeholder: { type: 'string' },
+        role: { type: 'string' },
+        type: { type: 'string' },
+      },
+      required: [],
+    },
+    text: { type: 'string', description: 'For type steps: the text to type.' },
+    description: { type: 'string', description: 'Optional human-readable label for this step.' },
+  },
+  required: ['action'],
+};
+
 export const TOOL_SCHEMAS: ToolSchema[] = [
+  // ── granular tools — for exploration, login flows, ambiguous pages ──────────
+  {
+    name: 'snapshot',
+    description:
+      'Inventory interactive elements on the active page (inputs, buttons, links). Returns an array of elements each with a verified CSS `selector` you can pass to click/type. ALWAYS snapshot before guessing a selector.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'screenshot',
+    description:
+      'Capture the visible viewport as a JPEG. Useful for understanding layout. Pair with snapshot() if you need to act on what you see.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
   {
     name: 'navigate',
-    description: 'Navigate the active tab to a URL. The URL must include scheme (https://).',
+    description:
+      'Navigate the active tab to a URL (must include https://). Triggers a host-allowlist permission prompt if the host is not already approved.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Absolute URL to navigate to.' } },
@@ -12,54 +62,73 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
     },
   },
   {
-    name: 'screenshot',
-    description: 'Capture the visible viewport of the active tab. Returns a JPEG image of what the user can see. Useful for understanding layout; pair with snapshot() to also get real CSS selectors.',
-    parameters: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'snapshot',
-    description: 'Return a list of interactive elements on the page (inputs, buttons, links, selects) with REAL CSS selectors you can pass to click/type. ALWAYS call this before guessing a selector — do not invent attributes like aria-label values you have not verified.',
-    parameters: { type: 'object', properties: {}, required: [] },
-  },
-  {
     name: 'click',
-    description: 'Click an element on the active page. selector must be a CSS selector that uniquely identifies the element.',
+    description:
+      'Click an element on the active page. `selector` must be a CSS selector returned by a recent snapshot() — do not invent selectors.',
     parameters: {
       type: 'object',
-      properties: { selector: { type: 'string', description: 'CSS selector for the element to click.' } },
+      properties: { selector: { type: 'string', description: 'CSS selector from snapshot().' } },
       required: ['selector'],
     },
   },
   {
     name: 'type',
-    description: 'Type text into an input or textarea on the active page.',
+    description: 'Type text into an input or textarea identified by a selector from snapshot().',
     parameters: {
       type: 'object',
       properties: {
         selector: { type: 'string', description: 'CSS selector for the input/textarea.' },
-        text: { type: 'string', description: 'Text to type into the element.' },
+        text: { type: 'string', description: 'Text to type.' },
       },
       required: ['selector', 'text'],
     },
   },
   {
     name: 'extract',
-    description: 'Extract text content from the active page. If selector is omitted, returns the entire visible page text.',
+    description:
+      'Extract text content from the active page. If `selector` is omitted, returns the entire visible page text. Returns the FULL text — use this when the user asks for a list, table, or anything where completeness matters.',
     parameters: {
       type: 'object',
-      properties: { selector: { type: 'string', description: 'Optional CSS selector to extract from.' } },
+      properties: { selector: { type: 'string', description: 'Optional CSS selector to scope extraction.' } },
       required: [],
     },
   },
+
+  // ── planner + executor — for known multi-step flows ─────────────────────────
   {
-    name: 'done',
-    description: 'Mark the task complete.',
+    name: 'plan_actions',
+    description:
+      'Ask the planner to draft a deterministic action script (navigate/snapshot/click/type/extract steps) for a multi-step browser task. Side-effect free — returns the proposed script for you to inspect, refine, or pass to execute_actions. Provide the current page context (from a recent snapshot()) so the planner uses real visible labels for targets. Use this when you have a clear multi-step plan and want to batch into one approval + many cheap deterministic steps. For exploratory or unfamiliar pages, prefer the granular tools instead.',
     parameters: {
       type: 'object',
       properties: {
-        summary: { type: 'string', description: 'The actual result or answer — include extracted data, lists, findings, or a description of the action taken. Do NOT write a meta-description of what you did; write the result itself.' },
+        goal: { type: 'string', description: 'What the script should accomplish.' },
+        pageContext: {
+          type: 'string',
+          description: 'Snapshot summary (URL, title, visible elements). Pass the formatted snapshot text from a recent snapshot() call.',
+        },
       },
-      required: ['summary'],
+      required: ['goal', 'pageContext'],
+    },
+  },
+  {
+    name: 'execute_actions',
+    description:
+      'Run a script (array of action steps) deterministically. If approvalMode is always_ask the user sees a Approve/Reject card before any side effects. Returns { status, extracted, results } — extracted is the FULL concatenation of every extract step (no truncation), results is per-step status. Use this after plan_actions when ready to act.',
+    parameters: {
+      type: 'object',
+      properties: {
+        script: {
+          type: 'array',
+          description: 'Ordered list of action steps to execute.',
+          items: SCRIPT_STEP_SCHEMA,
+        },
+        rationale: {
+          type: 'string',
+          description: 'Short human-readable rationale shown in the approval card.',
+        },
+      },
+      required: ['script'],
     },
   },
 ];

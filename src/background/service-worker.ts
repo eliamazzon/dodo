@@ -29,17 +29,14 @@ chrome.runtime.onConnect.addListener((port) => {
 
   port.onMessage.addListener(async (msg: PanelToBg) => {
     switch (msg.kind) {
-      case 'submit_task':
-        void agent.submit(msg.task);
+      case 'send_message':
+        void agent.sendMessage(msg.text);
         break;
-      case 'continue_chat':
-        void agent.continueChat(msg.text);
+      case 'approve_execution':
+        void agent.approveExecution(msg.messageId);
         break;
-      case 'approve_plan':
-        void agent.approvePlan();
-        break;
-      case 'edit_plan':
-        agent.reset();
+      case 'reject_execution':
+        void agent.rejectExecution(msg.messageId);
         break;
       case 'stop':
         agent.stop();
@@ -58,6 +55,10 @@ chrome.runtime.onConnect.addListener((port) => {
         break;
       case 'set_mode':
         await saveSettings({ defaultMode: msg.mode });
+        void send();
+        break;
+      case 'set_approval_mode':
+        await saveSettings({ approvalMode: msg.mode });
         void send();
         break;
       case 'test_notify':
