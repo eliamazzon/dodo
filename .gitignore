@@ -1,3 +1,5 @@
 node_modules/
 dist/
 *.tsbuildinfo
+.ignore/
+console-*.log
