@@ -1,11 +1,15 @@
 // 'ask' requires user approval before each navigation; 'auto' runs fully autonomously; 'watch' observes without acting.
 export type Mode = 'ask' | 'auto' | 'watch';
 
+// Gates execute_actions. 'always_ask' surfaces an inline Approve/Reject card; 'auto_accept' runs immediately.
+export type ApprovalMode = 'always_ask' | 'auto_accept';
+
 export type Settings = {
   providerId: string;
   apiKey: string;
   model: string;
   defaultMode: Mode;
+  approvalMode: ApprovalMode;
   confirmNavigation: boolean;
   screenshotRedaction: boolean;
   telemetry: boolean;
@@ -17,8 +21,9 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   providerId: 'gemini',
   apiKey: '',
-  model: 'gemini-3.1-flash-lite',
+  model: 'gemini-3-flash-preview',
   defaultMode: 'ask',
+  approvalMode: 'always_ask',
   confirmNavigation: true,
   screenshotRedaction: true,
   telemetry: false,
@@ -27,10 +32,12 @@ export const DEFAULT_SETTINGS: Settings = {
   onboarded: false,
 };
 
+// Internal planner output. Not part of AgentState; lives inside plan_proposal UIMessages.
 export type Plan = {
   sites: string[];
   steps: string[];
-  script?: ScriptStep[];
+  script: ScriptStep[];
+  explanation?: string;
 };
 
 export type ScriptTarget = {
@@ -46,8 +53,7 @@ export type ScriptStep =
   | { action: 'snapshot'; description?: string }
   | { action: 'click'; target: ScriptTarget; description?: string }
   | { action: 'type'; target: ScriptTarget; text: string; description?: string }
-  | { action: 'extract'; description?: string }
-  | { action: 'done'; summary: string };
+  | { action: 'extract'; description?: string };
 
 export type SnapshotElement = {
   tag: string;
@@ -67,63 +73,96 @@ export type SnapshotResult = {
   elements: SnapshotElement[];
 };
 
-export type ToolName = 'navigate' | 'screenshot' | 'snapshot' | 'click' | 'type' | 'extract' | 'done';
+export type ToolName =
+  | 'snapshot'
+  | 'screenshot'
+  | 'navigate'
+  | 'click'
+  | 'type'
+  | 'extract'
+  | 'plan_actions'
+  | 'execute_actions';
 
-export type ToolCallRecord = {
-  id: string;
-  name: ToolName;
-  args: Record<string, unknown>;
-  status: 'pending' | 'ok' | 'error';
-  startedAt: number;
-  endedAt?: number;
-  result?: unknown;
-  errorMsg?: string;
-  label?: string;
-  detail?: string;
-  thumb?: string;
-};
-
-/**
- * State machine:
- * idle → planning → awaiting_approval → working → complete | error
- *                                         └→ awaiting_permission → working | error
- */
 export type AgentPhase =
   | 'idle'
-  | 'planning'
-  | 'awaiting_approval'
   | 'working'
+  | 'awaiting_approval'
   | 'awaiting_permission'
   | 'complete'
   | 'error';
-
-export type CompleteSummary = {
-  summary: string;
-  actionItems: { priority: 'p0' | 'p1' | 'p2'; text: string }[];
-  durationMs: number;
-  steps: number;
-};
 
 export type PendingPermission = {
   host: string;
   reason: string;
 };
 
+export type StepResult = {
+  action: ScriptStep['action'];
+  status: 'ok' | 'error' | 'skipped';
+  error?: string;
+};
+
+export type ExecutionStatus = 'pending_approval' | 'running' | 'done' | 'rejected' | 'error';
+
+export type ToolActivityStatus = 'pending' | 'ok' | 'error';
+
+export type UIMessage =
+  | { id: string; kind: 'user'; text: string; t: number }
+  | { id: string; kind: 'assistant'; text: string; t: number }
+  | {
+      id: string;
+      kind: 'tool_activity';
+      name: ToolName;
+      args?: Record<string, unknown>;
+      status: ToolActivityStatus;
+      detail?: string;
+      thumb?: string;
+      t: number;
+    }
+  | {
+      id: string;
+      kind: 'plan_proposal';
+      goal: string;
+      sites?: string[];
+      steps: string[];
+      script: ScriptStep[];
+      explanation?: string;
+      t: number;
+    }
+  | {
+      id: string;
+      kind: 'execution';
+      script: ScriptStep[];
+      status: ExecutionStatus;
+      rationale?: string;
+      results?: StepResult[];
+      extractedPreview?: string;
+      workingLabel?: string;
+      t: number;
+    }
+  | {
+      id: string;
+      kind: 'permission_request';
+      host: string;
+      reason: string;
+      status: 'pending' | 'allowed' | 'denied';
+      t: number;
+    }
+  | { id: string; kind: 'error'; text: string; t: number };
+
 export type AgentState = {
   phase: AgentPhase;
-  task?: string;
-  plan?: Plan;
-  toolCalls: ToolCallRecord[];
-  workingLabel?: string;
+  messages: UIMessage[];
+  pendingExecution?: { messageId: string };
   pendingPermission?: PendingPermission;
+  workingLabel?: string;
   errorMsg?: string;
-  complete?: CompleteSummary;
   startedAt?: number;
 };
 
 export const INITIAL_AGENT_STATE: AgentState = {
   phase: 'idle',
-  toolCalls: [],
+  messages: [],
 };
 
 // 'paused' and 'watch' are legacy values kept for backwards-compatible history reads.

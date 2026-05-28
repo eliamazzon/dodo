@@ -1,16 +1,16 @@
-import type { AgentState, Settings, HistoryItem, Mode } from './types';
+import type { AgentState, Settings, HistoryItem, Mode, ApprovalMode } from './types';
 
 export type PanelToBg =
-  | { kind: 'submit_task'; task: string }
-  | { kind: 'continue_chat'; text: string }
-  | { kind: 'approve_plan' }
-  | { kind: 'edit_plan' }
+  | { kind: 'send_message'; text: string }
+  | { kind: 'approve_execution'; messageId: string }
+  | { kind: 'reject_execution'; messageId: string }
   | { kind: 'stop' }
   | { kind: 'allow_host'; host: string; remember: boolean }
   | { kind: 'deny_permission' }
   | { kind: 'retry' }
   | { kind: 'reset' }
   | { kind: 'set_mode'; mode: Mode }
+  | { kind: 'set_approval_mode'; mode: ApprovalMode }
   | { kind: 'test_notify' }
   | { kind: 'open_history'; id: string }
   | { kind: 'delete_history'; id: string };
