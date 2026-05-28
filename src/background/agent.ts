@@ -29,11 +29,12 @@ You drive the browser with these tools, one action at a time, inspecting the pag
   • navigate({url}) — go to a URL. Triggers a host-allowlist prompt if needed.
   • click({selector}) — click an element. Selector must be a \`data-sel\` ref from snapshot(). Returns a diff of what changed in the DOM (appeared/disappeared/aria changes), with fresh refs for anything that appeared.
   • type({selector, text}) — type into an input/textarea, identified by a \`data-sel\` ref.
-  • extract({selector?}) — read text from the page. Returns FULL text (no truncation). Use this for lists, tables, anything where completeness matters.
+  • extract({selector?, mode?}) — survey or read the page. mode="map" (default) returns a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label, covering the whole page (or a scoped region) — use it to enumerate lists/grids/menus/results and get refs for all of them. mode="text" returns the full readable page text for reading prose/tables/prices.
 
 The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
 
 RULES:
+- For long lists, tables, grids, or menus (inboxes, search results, settings, file lists), call extract() to enumerate EVERY item with its ref in one compact view. Do NOT drill into rows one-by-one, and do NOT assume a snapshot showed the whole list — a snapshot is depth-limited and may be truncated. A snapshot containing "… children omitted …" or "depth limit" is a PARTIAL view: switch to extract() to see everything. snapshot() is for structure/layout; extract() is for breadth.
 - Do NOT invent refs or selectors. Use a \`data-sel\` ref from the LATEST snapshot (refs from a stale snapshot may no longer resolve). If you don't have one, call snapshot() first. The \`element\` arg of snapshot() is also a ref/selector from the latest snapshot — never make one up.
 - Don't call done() — there is no done tool. End your turn with a plain text message and that text IS your answer to the user.
 - Format your answer to fit the task. If the user asks for a list, output a list. If they ask a yes/no, answer briefly. If they ask for a table, use markdown. Never compress a list into a count or summary unless explicitly asked.
@@ -612,7 +613,11 @@ class Agent {
       return r.data;
     }
     if (name === 'extract') {
-      const r = await runContentOp(tab.id, { op: 'extract', selector: args.selector ? String(args.selector) : undefined });
+      const r = await runContentOp(tab.id, {
+        op: 'extract',
+        selector: args.selector ? String(args.selector) : undefined,
+        mode: args.mode === 'text' ? 'text' : 'map',
+      });
       if (!r.ok) throw new Error(r.error);
       return r.data;
     }
@@ -963,7 +968,10 @@ function labelFor(name: ToolName, args: Record<string, unknown>): string {
   if (name === 'snapshot') return args.element ? `expand ${args.element}` : 'read page DOM';
   if (name === 'click') return `click ${args.selector ?? ''}`;
   if (name === 'type') return `type into ${args.selector ?? ''}`;
-  if (name === 'extract') return args.selector ? `extract ${args.selector}` : 'read page';
+  if (name === 'extract') {
+    const verb = args.mode === 'text' ? 'read' : 'map';
+    return args.selector ? `${verb} ${args.selector}` : `${verb} page`;
+  }
   if (name === 'plan_actions') return 'plan actions';
   if (name === 'execute_actions') return 'execute actions';
   return name;

@@ -169,9 +169,10 @@ const INTERACTIVE_SEL = [
 ].join(', ');
 
 // Visible interactive elements — the set that carries a `data-sel` in the HTML serialization
-// and that the click diff compares before/after.
-function interactiveCandidates(): Element[] {
-  return Array.from(document.querySelectorAll(INTERACTIVE_SEL))
+// and that the click diff compares before/after. `root` scopes the search (defaults to the
+// whole document) so the extract map can survey a single region.
+function interactiveCandidates(root: ParentNode = document): Element[] {
+  return Array.from(root.querySelectorAll(INTERACTIVE_SEL))
     .filter(isVisible)
     .filter((el) => {
       // <label> elements are only useful when they wrap a hidden input (custom checkbox/radio).
@@ -243,19 +244,9 @@ function directText(el: Element): string {
   return t.trim().replace(/\s+/g, ' ');
 }
 
-function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Element>, cap?: number): string {
+function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Element>, cap: number): string {
   let out = '';
-  let truncated = false;
-
-  const emit = (s: string) => {
-    if (truncated) return;
-    if (cap != null && out.length + s.length > cap) {
-      out += '\n<!-- truncated -->';
-      truncated = true;
-      return;
-    }
-    out += s;
-  };
+  const emit = (s: string) => { out += s; };
 
   const attrsFor = (el: Element): string => {
     const parts: string[] = [];
@@ -278,7 +269,7 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
   };
 
   const walk = (el: Element, depth: number) => {
-    if (truncated) return;
+    if (out.length >= cap) return; // budget blown — stop descending; the sibling loop notes the omission
     const tag = el.tagName.toLowerCase();
     const open = `<${tag}${attrsFor(el)}>`;
     const close = `</${tag}>`;
@@ -294,7 +285,7 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
       } else if (text && text.length <= 80) {
         emit(open + escapeText(text) + close);
       } else {
-        emit(open + `<!-- ${childEls.length} children -->` + close);
+        emit(open + `<!-- ${childEls.length} children, depth limit — snapshot({element}) to expand or extract for a flat list -->` + close);
       }
       return;
     }
@@ -302,7 +293,13 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
     emit(open);
     const txt = directText(el);
     if (txt) emit(escapeText(txt));
-    for (const c of childEls) walk(c, depth - 1);
+    for (let i = 0; i < childEls.length; i++) {
+      if (out.length >= cap) {
+        emit(`<!-- ${childEls.length - i} of ${childEls.length} children omitted (output cap; use extract for the full list) -->`);
+        break;
+      }
+      walk(childEls[i], depth - 1);
+    }
     emit(close);
   };
 
@@ -310,9 +307,11 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
   return out;
 }
 
-// Hard ceiling on serialized HTML. Always applied (depth alone doesn't bound output — a wide tree
-// or a large explicit `n` can still explode), so it's a safety valve, not the primary limiter.
-const MAX_HTML = 30000;
+// Soft ceiling on serialized HTML (~30k tokens). Generous given Gemini's ~1M-token window, so a
+// full page/list usually fits; when it doesn't, truncation now reports the omitted-child count so
+// the model knows the view is partial. Note: this is per-snapshot and the conversation accumulates,
+// so it's still bounded rather than unlimited.
+const MAX_HTML = 120000;
 
 function snapshotHtml(selector?: string, depth?: number) {
   const interactiveSet = new Set<Element>(interactiveCandidates());
@@ -406,6 +405,46 @@ function formatDiff(before: Map<string, ElInfo>, after: Map<string, ElInfo>): st
   return lines.join('\n');
 }
 
+// ── Extract map — a compact, ref-bearing survey of every interactive element under `root` ─────
+// One line per element so a long list/grid/menu fits in a few KB (vs. the deep HTML snapshot,
+// which truncates). Each ref is registered (assignRef) so the model can click/type it afterward.
+const MAP_MAX_LINES = 400;
+
+function extractMap(root: Element): string {
+  const cands = interactiveCandidates(root);
+  const set = new Set<Element>(cands);
+  const lines: string[] = [];
+  for (const el of cands) {
+    if (lines.length >= MAP_MAX_LINES) break;
+    const tag = el.tagName.toLowerCase();
+    const text = ownText(el, set).slice(0, 80);
+    const parts = [`[${assignRef(el)}]`, tag];
+    if (text) parts.push(`"${text}"`);
+    const role = el.getAttribute('role');
+    if (role && !['button', 'a', 'input', 'textarea', 'select'].includes(tag)) parts.push(`role=${role}`);
+    const aria = el.getAttribute('aria-label');
+    if (aria && !text) parts.push(`aria="${aria.slice(0, 80)}"`);
+    const ph = el.getAttribute('placeholder');
+    if (ph) parts.push(`placeholder="${ph.slice(0, 60)}"`);
+    const type = el.getAttribute('type');
+    if (type) parts.push(`type=${type}`);
+    if (tag === 'input' || tag === 'textarea') {
+      const v = (el as HTMLInputElement | HTMLTextAreaElement).value;
+      if (v) parts.push(`value="${v.slice(0, 60)}"`);
+    }
+    if (tag === 'a') {
+      const href = el.getAttribute('href');
+      if (href) parts.push(`href=${href.slice(0, 80)}`);
+    }
+    lines.push(parts.join(' '));
+  }
+  let out = lines.join('\n');
+  if (cands.length > lines.length) {
+    out += `\n… and ${cands.length - lines.length} more interactive elements (scope with a selector to see them)`;
+  }
+  return out || '(no interactive elements found)';
+}
+
 async function handle(op: ContentOp): Promise<ContentResult> {
   console.log('%c[dodo:content]', 'color:#6b4ea3;font-weight:600', op);
   try {
@@ -439,7 +478,10 @@ async function handle(op: ContentOp): Promise<ContentResult> {
         ? (resolveRef(op.selector) as HTMLElement | null)
         : document.body;
       if (!target) return { ok: false, error: `no element matches ${op.selector}` };
-      const text = (target.innerText ?? '').replace(/\s+\n/g, '\n').trim();
+      // Default 'map' = compact interactive survey (every element + its ref); 'text' = raw prose.
+      const text = op.mode === 'text'
+        ? (target.innerText ?? '').replace(/\s+\n/g, '\n').trim()
+        : extractMap(target);
       return { ok: true, data: { text, title: document.title, url: location.href } };
     }
     if (op.op === 'snapshot') {

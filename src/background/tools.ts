@@ -93,10 +93,13 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'extract',
     description:
-      'Extract text content from the active page. If `selector` is omitted, returns the entire visible page text. Returns the FULL text — use this when the user asks for a list, table, or anything where completeness matters.',
+      'Survey or read the active page. mode="map" (default) returns a COMPACT list of every interactive element with its `data-sel` ref and label — one line each — covering the whole page (or a scoped region). Use it to enumerate lists/grids/menus/search-results and to find things to click/type, especially when a snapshot would be truncated. mode="text" returns the FULL readable page text (no truncation) for reading prose, tables, or prices. Refs from the map are clickable.',
     parameters: {
       type: 'object',
-      properties: { selector: { type: 'string', description: 'Optional CSS selector to scope extraction.' } },
+      properties: {
+        selector: { type: 'string', description: 'Optional `data-sel` ref or CSS selector to scope to a region. Omit for the whole page.' },
+        mode: { type: 'string', enum: ['map', 'text'], description: 'map = compact interactive element list with refs (default); text = full readable prose.' },
+      },
       required: [],
     },
   },

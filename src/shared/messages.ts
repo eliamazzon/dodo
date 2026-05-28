@@ -21,7 +21,7 @@ export type BgToPanel =
 export type ContentOp =
   | { op: 'click'; selector: string }
   | { op: 'type'; selector: string; text: string }
-  | { op: 'extract'; selector?: string }
+  | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
   | { op: 'snapshot_structured' }; // structured elements[] — kept for the disabled planner path
 
