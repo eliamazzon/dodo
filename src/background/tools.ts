@@ -42,8 +42,15 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'snapshot',
     description:
-      'Inventory interactive elements on the active page (inputs, buttons, links). Returns an array of elements each with a verified CSS `selector` you can pass to click/type. ALWAYS snapshot before guessing a selector.',
-    parameters: { type: 'object', properties: {}, required: [] },
+      'Snapshot the page DOM as HTML. Interactive elements carry a short `data-sel` ref token (e.g. data-sel="e42") — pass that ref to click() or type(). snapshot() → full page expanded 3 levels from <body>. snapshot({element}) → that element fully expanded. snapshot({element, n}) → that element expanded n levels. Use snapshot() for an overview, then snapshot({element}) to drill into a container (dropdown, dialog, table). ALWAYS snapshot before guessing a ref.',
+    parameters: {
+      type: 'object',
+      properties: {
+        element: { type: 'string', description: 'A `data-sel` ref (e.g. "e42") or CSS selector from the latest snapshot to drill into. Omit for a full-page overview. Do not invent a value.' },
+        n: { type: 'number', description: 'Levels to expand from `element`. Omit for full expansion.' },
+      },
+      required: [],
+    },
   },
   {
     name: 'screenshot',
@@ -64,20 +71,20 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'click',
     description:
-      'Click an element on the active page. `selector` must be a CSS selector returned by a recent snapshot() — do not invent selectors.',
+      'Click an element on the active page. `selector` must be a `data-sel` ref (e.g. "e42") from a recent snapshot() — do not invent refs. Returns a diff of what changed in the DOM after the click (elements that appeared/disappeared, aria-expanded/selected/disabled changes), so you usually do not need to snapshot() again just to see the result.',
     parameters: {
       type: 'object',
-      properties: { selector: { type: 'string', description: 'CSS selector from snapshot().' } },
+      properties: { selector: { type: 'string', description: 'A `data-sel` ref from snapshot() (e.g. "e42").' } },
       required: ['selector'],
     },
   },
   {
     name: 'type',
-    description: 'Type text into an input or textarea identified by a selector from snapshot().',
+    description: 'Type text into an input or textarea identified by a `data-sel` ref from snapshot().',
     parameters: {
       type: 'object',
       properties: {
-        selector: { type: 'string', description: 'CSS selector for the input/textarea.' },
+        selector: { type: 'string', description: 'A `data-sel` ref from snapshot() for the input/textarea (e.g. "e42").' },
         text: { type: 'string', description: 'Text to type.' },
       },
       required: ['selector', 'text'],
@@ -93,8 +100,13 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       required: [],
     },
   },
+];
 
-  // ── planner + executor — for known multi-step flows ─────────────────────────
+// ── planner + executor — DISABLED for now, kept for later reuse ───────────────
+// These schemas are intentionally NOT part of TOOL_SCHEMAS, so the model is never
+// offered them and cannot call them. The handler/executor code in agent.ts stays
+// intact. To re-enable, spread PLANNER_TOOL_SCHEMAS back into TOOL_SCHEMAS.
+export const PLANNER_TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'plan_actions',
     description:

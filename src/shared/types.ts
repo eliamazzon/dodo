@@ -73,6 +73,13 @@ export type SnapshotResult = {
   elements: SnapshotElement[];
 };
 
+// HTML snapshot — what the granular snapshot() tool returns to the orchestrator LLM.
+export type HtmlSnapshotResult = {
+  title: string;
+  url: string;
+  html: string;
+};
+
 export type ToolName =
   | 'snapshot'
   | 'screenshot'

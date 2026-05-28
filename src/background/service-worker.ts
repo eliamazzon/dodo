@@ -13,6 +13,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
 });
 
+// Debug hook — from the service-worker DevTools console (chrome://extensions →
+// DODO → "service worker"):
+//   copy(dodoExport())          copies the full LLM-view JSON to the clipboard
+//   dodoExport(false)           same but with image base64 omitted (smaller)
+// The returned object is the exact payload the orchestrator LLM sees: system prompt,
+// tool schemas, and the raw conversation (tool calls, tool outputs, images).
+(globalThis as unknown as { dodoExport: (includeImages?: boolean) => unknown }).dodoExport =
+  (includeImages = true) => agent.exportForLLM(includeImages);
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== PORT_NAME) return;
 

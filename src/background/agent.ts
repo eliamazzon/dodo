@@ -1,10 +1,13 @@
 // Chat-loop agent. Single LLM orchestrator drives the conversation; it invokes browser tools
-// (snapshot/screenshot/navigate/click/type/extract) one at a time for exploration, or plan_actions →
-// execute_actions to batch a known multi-step flow into one approval. The final assistant text is the
+// (snapshot/screenshot/navigate/click/type/extract) one at a time, inspecting the page between
+// actions. snapshot() returns the page as HTML (interactive elements carry a `data-sel` the model
+// passes to click/type); click() returns a diff of what changed. The final assistant text is the
 // answer — no forced summary tool.
+// (The planner/executor tools — plan_actions/execute_actions — are currently disabled but their
+// code is retained below for later reuse.)
 import type {
   AgentState, Plan, HistoryItem, HistoryStatus, SavedConversationMessage, SavedConversationPart,
-  ScriptStep, SnapshotElement, SnapshotResult, ScriptTarget,
+  ScriptStep, SnapshotElement, SnapshotResult, HtmlSnapshotResult, ScriptTarget,
   UIMessage, ToolName, StepResult, ExecutionStatus,
 } from '../shared/types';
 import { INITIAL_AGENT_STATE } from '../shared/types';
@@ -20,32 +23,18 @@ type Listener = (s: AgentState) => void;
 
 const EXEC_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser. You are in a chat conversation with the user — every turn you receive what they said and what tools have returned, and you respond with either tool calls or a final text answer.
 
-You have two tiers of browser tools. **Default to the granular tier.** The planner/executor is only for known, predictable, multi-page flows (e.g., "search X on site Y and read the first result").
-
-GRANULAR TOOLS — use these for almost everything: any task with a UI menu/dropdown/modal/dialog, any task where the user is already on the right page, any task where the next click depends on what just appeared (mail labeling, in-app workflows, login, filters, settings):
-  • snapshot()  — list interactive elements with verified CSS selectors. Call this before guessing a selector.
-  • screenshot() — capture the viewport as a JPEG (layout context, no selectors).
+You drive the browser with these tools, one action at a time, inspecting the page between actions. This works for everything: tasks with a UI menu/dropdown/modal/dialog, tasks where the user is already on the right page, and tasks where the next click depends on what just appeared (mail labeling, in-app workflows, login, filters, settings):
+  • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token (e.g. data-sel="e42"); pass that ref as the selector to click/type. snapshot() gives a full-page overview (3 levels deep); snapshot({element: "e42"}) fully expands one container (dropdown, dialog, table row) — \`element\` is a ref from the latest snapshot; snapshot({element, n}) expands it n levels. Start with snapshot() for an overview, then drill in.
+  • screenshot() — capture the viewport as a JPEG (layout context, no refs).
   • navigate({url}) — go to a URL. Triggers a host-allowlist prompt if needed.
-  • click({selector}) — click an element. Selector must come from snapshot().
-  • type({selector, text}) — type into an input/textarea.
+  • click({selector}) — click an element. Selector must be a \`data-sel\` ref from snapshot(). Returns a diff of what changed in the DOM (appeared/disappeared/aria changes), with fresh refs for anything that appeared.
+  • type({selector, text}) — type into an input/textarea, identified by a \`data-sel\` ref.
   • extract({selector?}) — read text from the page. Returns FULL text (no truncation). Use this for lists, tables, anything where completeness matters.
 
-PLANNER + EXECUTOR — only for predictable cross-page flows where you can write the whole script up-front without needing to look at intermediate results:
-  • plan_actions({goal, pageContext}) — draft a script of action steps. Side-effect free; you get the script back to inspect.
-  • execute_actions({script, rationale?}) — run a script. Returns {status, extracted, results}. Gated by the user's approval setting. extracted concatenates all extract steps in full.
-
-When in doubt, use the granular tools. Specifically NEVER batch a "click X then click Y" sequence into execute_actions if Y is something that only appears AFTER X (a menu item, a confirm button, a newly-opened dialog) — that requires looking at the page between clicks, which means snapshot() + click() one at a time.
-
-SCRIPT STEP SHAPES (for execute_actions / plan_actions):
-  {"action":"navigate","url":"https://…"}
-  {"action":"snapshot"}                                  // refresh page state; cannot be the only step
-  {"action":"click","target":{text?,aria?,placeholder?,role?,type?},"description":"why"}
-  {"action":"type","target":{...},"text":"value"}
-  {"action":"extract"}
-Targets use VISIBLE element properties from a recent snapshot — never CSS selectors. Every execute_actions script must contain at least one click/type/navigate/extract step; a script of only snapshots is rejected.
+The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
 
 RULES:
-- Do NOT invent CSS selectors. If you don't have one from a recent snapshot(), call snapshot() first.
+- Do NOT invent refs or selectors. Use a \`data-sel\` ref from the LATEST snapshot (refs from a stale snapshot may no longer resolve). If you don't have one, call snapshot() first. The \`element\` arg of snapshot() is also a ref/selector from the latest snapshot — never make one up.
 - Don't call done() — there is no done tool. End your turn with a plain text message and that text IS your answer to the user.
 - Format your answer to fit the task. If the user asks for a list, output a list. If they ask a yes/no, answer briefly. If they ask for a table, use markdown. Never compress a list into a count or summary unless explicitly asked.
 - When the user asks a follow-up that you can answer from prior turns' extracted text, just answer — don't re-browse.
@@ -162,15 +151,6 @@ function resolveTarget(target: ScriptTarget, elements: SnapshotElement[], action
     if (score > (best?.score ?? 0)) best = { selector: el.selector, score };
   }
   return best && best.score >= RESOLVE_THRESHOLD ? best.selector : null;
-}
-
-function formatSnapshot(data: SnapshotResult): string {
-  const lines = (data.elements ?? []).slice(0, 60).map((e: SnapshotElement) =>
-    [e.tag, e.text ? `text="${e.text}"` : '', e.aria ? `aria="${e.aria}"` : '',
-     e.placeholder ? `ph="${e.placeholder}"` : '', e.role ? `role="${e.role}"` : '',
-     e.type ? `type="${e.type}"` : ''].filter(Boolean).join(' ')
-  );
-  return `URL: ${data.url ?? ''}\nTitle: ${data.title ?? ''}\nElements:\n${lines.join('\n')}`;
 }
 
 function newId(prefix: string): string {
@@ -294,7 +274,10 @@ class Agent {
     if (tab?.id != null && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
       try {
         const snap = await runContentOp(tab.id, { op: 'snapshot' });
-        if (snap.ok && snap.data) pageContext = formatSnapshot(snap.data as SnapshotResult);
+        if (snap.ok && snap.data) {
+          const data = snap.data as HtmlSnapshotResult;
+          pageContext = `URL: ${data.url}\nTitle: ${data.title}\n\n${data.html}`;
+        }
       } catch { /* best-effort */ }
     }
 
@@ -444,7 +427,7 @@ class Agent {
     if (!settings.apiKey) return this.fail('no api key configured — open settings to add your api key');
 
     let emptyTurns = 0;
-    for (let turn = 0; turn < 40 && !this.aborted; turn++) {
+    for (let turn = 0; turn < 200 && !this.aborted; turn++) {
       log.info(`turn ${turn} → chat`, { messages: this.conversation.length });
       this.setState({ workingLabel: 'thinking' });
       let res;
@@ -610,7 +593,11 @@ class Agent {
       return { ok: true, base64, thumb: base64.slice(0, 200) };
     }
     if (name === 'snapshot') {
-      const r = await runContentOp(tab.id, { op: 'snapshot' });
+      const r = await runContentOp(tab.id, {
+        op: 'snapshot',
+        selector: args.element ? String(args.element) : undefined,
+        depth: typeof args.n === 'number' ? args.n : undefined,
+      });
       if (!r.ok) throw new Error(r.error);
       return r.data;
     }
@@ -859,7 +846,7 @@ class Agent {
   private async doSnapshotForScript(): Promise<SnapshotResult | null> {
     const tab = await getActiveTab();
     if (!tab?.id) return null;
-    const r = await runContentOp(tab.id, { op: 'snapshot' });
+    const r = await runContentOp(tab.id, { op: 'snapshot_structured' });
     if (!r.ok || !r.data) return null;
     return r.data as SnapshotResult;
   }
@@ -907,6 +894,30 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
     } catch { return null; }
   }
 
+  // Debug: dump the exact payload the orchestrator LLM sees — system prompt, tool schemas,
+  // and the raw conversation (text, tool_call args, tool_result outputs, image parts). This is
+  // the live in-memory ChatMessage[], not the prettified UI messages. Used by the service-worker
+  // console hook (globalThis.dodoExport) to inspect/export a session as JSON.
+  exportForLLM(includeImages = true) {
+    const messages = includeImages
+      ? this.conversation
+      : this.conversation.map((m) => ({
+          ...m,
+          parts: m.parts.map((p) =>
+            p.type === 'image' ? { type: 'image_omitted', mimeType: p.mimeType } : p,
+          ),
+        }));
+    return {
+      exportedAt: new Date().toISOString(),
+      taskId: this.taskId,
+      title: this.firstUserText,
+      phase: this.state.phase,
+      systemPrompt: EXEC_SYSTEM,
+      tools: TOOL_SCHEMAS,
+      messages,
+    };
+  }
+
   private complete() {
     log.info('complete');
     this.setState({ phase: 'complete', workingLabel: undefined });
@@ -949,7 +960,7 @@ function parsePlan(text: string): Plan | null {
 function labelFor(name: ToolName, args: Record<string, unknown>): string {
   if (name === 'navigate') return `navigate to ${hostFromUrl(String(args.url ?? '')) || args.url}`;
   if (name === 'screenshot') return 'capture viewport';
-  if (name === 'snapshot') return 'inventory page elements';
+  if (name === 'snapshot') return args.element ? `expand ${args.element}` : 'read page DOM';
   if (name === 'click') return `click ${args.selector ?? ''}`;
   if (name === 'type') return `type into ${args.selector ?? ''}`;
   if (name === 'extract') return args.selector ? `extract ${args.selector}` : 'read page';
@@ -964,8 +975,8 @@ function detailFor(name: ToolName, result: unknown): string | undefined {
     if (r?.text) return `${r.text.length} chars`;
   }
   if (name === 'snapshot') {
-    const r = result as { elements?: unknown[] };
-    if (Array.isArray(r?.elements)) return `${r.elements.length} elements`;
+    const r = result as { html?: string };
+    if (typeof r?.html === 'string') return `${r.html.length} chars`;
   }
   if (name === 'screenshot') return 'jpeg · q70';
   return undefined;

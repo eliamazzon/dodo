@@ -22,7 +22,8 @@ export type ContentOp =
   | { op: 'click'; selector: string }
   | { op: 'type'; selector: string; text: string }
   | { op: 'extract'; selector?: string }
-  | { op: 'snapshot' };
+  | { op: 'snapshot'; selector?: string; depth?: number }
+  | { op: 'snapshot_structured' }; // structured elements[] — kept for the disabled planner path
 
 export type ContentResult =
   | { ok: true; data: unknown }
