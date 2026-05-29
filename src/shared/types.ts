@@ -121,6 +121,11 @@ export type UIMessage =
       kind: 'tool_activity';
       name: ToolName;
       args?: Record<string, unknown>;
+      // The result the LLM saw. Kept on the message for live display only — stripped on persist
+      // (it lives canonically in the saved conversation) and rehydrated on reopen via `callId`.
+      result?: unknown;
+      // LLM tool-call id; links this row to its tool_result in the conversation for rehydration.
+      callId?: string;
       status: ToolActivityStatus;
       detail?: string;
       thumb?: string;

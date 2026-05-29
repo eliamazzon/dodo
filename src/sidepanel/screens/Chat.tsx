@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Palette } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
 import { PanelShell } from '../components/PanelShell';
@@ -24,26 +24,71 @@ const toolIcon = (name: ToolName) => {
 };
 
 function ToolActivityRow({
-  c, name, detail, status, thumb,
+  c, name, detail, status, thumb, args, result,
 }: {
   c: Palette;
   name: ToolName;
   detail?: string;
   status: 'pending' | 'ok' | 'error';
   thumb?: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const dot = status === 'error' ? c.error : status === 'ok' ? c.success : c.accent;
+  const responseText = result === undefined
+    ? null
+    : typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8,
-      padding: '5px 9px', fontSize: 11.5, color: c.muted,
-      background: c.surface2, border: `1px solid ${c.border}`, borderRadius: 6,
-    }}>
-      <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0 }}/>
-      <span style={{ color: c.muted, display: 'inline-flex' }}>{toolIcon(name)}</span>
-      <span style={{ color: c.ink, fontWeight: 500 }}>{name}</span>
-      {detail && <span style={{ flex: 1, color: c.subtle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {detail}</span>}
-      {thumb && <Thumb c={c} size={22} base64={thumb}/>}
+    <div style={{ marginBottom: 8 }}>
+      <div
+        onClick={() => setExpanded((e) => !e)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 9,
+          padding: '5px 9px', fontSize: 11.5, color: c.muted, cursor: 'pointer',
+          background: c.surface2, border: `1px solid ${c.border}`,
+          borderRadius: expanded ? '6px 6px 0 0' : 6,
+        }}
+      >
+        <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0 }}/>
+        <span style={{ color: c.muted, display: 'inline-flex' }}>{toolIcon(name)}</span>
+        <span style={{ color: c.ink, fontWeight: 500 }}>{name}</span>
+        {detail && <span style={{ flex: 1, color: c.subtle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {detail}</span>}
+        {!detail && <span style={{ flex: 1 }}/>}
+        {thumb && <Thumb c={c} size={22} base64={thumb}/>}
+        <Ic.Chevron size={13} style={{ color: c.muted, flexShrink: 0, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}/>
+      </div>
+
+      {expanded && (
+        <div style={{
+          border: `1px solid ${c.border}`, borderTop: 'none', borderRadius: '0 0 6px 6px',
+          background: c.surface2, padding: '9px 10px',
+        }}>
+          <ToolDetailBlock c={c} label="call">
+            {`${name}(${JSON.stringify(args ?? {}, null, 2)})`}
+          </ToolDetailBlock>
+          <ToolDetailBlock c={c} label="response" muted={responseText === null}>
+            {responseText ?? 'no response yet'}
+          </ToolDetailBlock>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolDetailBlock({ c, label, muted, children }: {
+  c: Palette; label: string; muted?: boolean; children: string;
+}) {
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ color: c.subtle, fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}># {label}</div>
+      <pre style={{
+        margin: 0, maxHeight: 240, overflow: 'auto',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 10.5, lineHeight: 1.45,
+        color: muted ? c.muted : c.ink, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        padding: '7px 9px', borderRadius: 5, background: c.bg, border: `1px dashed ${c.border}`,
+      }}>{children}</pre>
     </div>
   );
 }
@@ -160,7 +205,7 @@ function renderMessage(m: UIMessage, props: {
   }
   if (m.kind === 'tool_activity') {
     return (
-      <ToolActivityRow key={m.id} c={c} name={m.name} detail={m.detail} status={m.status} thumb={m.thumb}/>
+      <ToolActivityRow key={m.id} c={c} name={m.name} detail={m.detail} status={m.status} thumb={m.thumb} args={m.args} result={m.result}/>
     );
   }
   if (m.kind === 'plan_proposal') {

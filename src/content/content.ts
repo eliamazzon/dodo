@@ -135,6 +135,49 @@ function resolveRef(token: string): Element | null {
   }
 }
 
+// Visible elements carrying an identifying hook the model's selector might have aimed at. Used only
+// on the error path, so the full-document scan is acceptable.
+function identifiableElements(): Element[] {
+  return Array.from(document.querySelectorAll('[id], [class], [data-testid], [role]')).filter(isVisible);
+}
+
+// When a selector/ref fails to resolve, suggest the closest live elements — with FRESH refs — so the
+// model can retry with a real ref instead of guessing another string (the recurring failure mode:
+// inventing CSS classes like `.jobs-search__job-details`). Fuzzy-matches the selector's identifier
+// fragments (classes/ids/testids/role/text) against `pool`. A stale `e\d+` ref yields no hint — the
+// only fix there is a fresh snapshot, which the caller already advises.
+function nearMisses(token: string, pool: Element[]): string {
+  if (/^e\d+$/.test(token)) return '';
+  const needles = (token.toLowerCase().match(/[a-z][a-z0-9_-]{1,}/g) ?? [])
+    .filter((n) => !['div', 'span'].includes(n));
+  if (!needles.length) return '';
+
+  const set = new Set<Element>(pool);
+  const scored = pool
+    .map((el) => {
+      const hay = [
+        el.id,
+        el.getAttribute('class') ?? '',
+        el.getAttribute('data-testid') ?? '',
+        el.getAttribute('role') ?? '',
+        ownText(el, set).slice(0, 40),
+      ].join(' ').toLowerCase();
+      let score = 0;
+      for (const n of needles) if (hay.includes(n)) score += n.length;
+      return { el, score };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  if (!scored.length) return '';
+
+  const lines = scored.map(({ el }) => {
+    const label = (ownText(el, set).slice(0, 50) || el.getAttribute('aria-label') || '').trim();
+    return `  [${assignRef(el)}] ${el.tagName.toLowerCase()}${label ? ` "${label}"` : ''}`;
+  });
+  return `\nClosest matches (retry with one of these refs):\n${lines.join('\n')}`;
+}
+
 // Text contributed by `el` itself, EXCLUDING text from any descendant that is also interactive
 // (i.e., another snapshot match). This stops wrapper rows from absorbing every inner button's label
 // into one giant blob — each entry in the snapshot describes only its own visible text.
@@ -311,7 +354,7 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
 // full page/list usually fits; when it doesn't, truncation now reports the omitted-child count so
 // the model knows the view is partial. Note: this is per-snapshot and the conversation accumulates,
 // so it's still bounded rather than unlimited.
-const MAX_HTML = 120000;
+const MAX_HTML = 30000;
 
 function snapshotHtml(selector?: string, depth?: number) {
   const interactiveSet = new Set<Element>(interactiveCandidates());
@@ -323,7 +366,7 @@ function snapshotHtml(selector?: string, depth?: number) {
     maxDepth = depth ?? 3;
   } else {
     const el = resolveRef(selector); // accepts a `data-sel` ref or a raw CSS selector
-    if (!el) throw new Error(`no element matches ${selector}`);
+    if (!el) throw new Error(`no element matches ${selector}` + nearMisses(selector, identifiableElements()));
     root = el;
     maxDepth = depth ?? Infinity; // full expansion of the drilled-in element when `n` is omitted
   }
@@ -450,7 +493,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
   try {
     if (op.op === 'click') {
       const el = resolveRef(op.selector);
-      if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` };
+      if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const before = interactiveElements(false);
       (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' });
       (el as HTMLElement).click();
@@ -462,7 +505,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
     }
     if (op.op === 'type') {
       const el = resolveRef(op.selector) as HTMLInputElement | HTMLTextAreaElement | null;
-      if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` };
+      if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       el.focus();
       const desc = Object.getOwnPropertyDescriptor(
         el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
@@ -477,7 +520,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       const target = op.selector
         ? (resolveRef(op.selector) as HTMLElement | null)
         : document.body;
-      if (!target) return { ok: false, error: `no element matches ${op.selector}` };
+      if (!target) return { ok: false, error: `no element matches ${op.selector}` + nearMisses(op.selector!, identifiableElements()) };
       // Default 'map' = compact interactive survey (every element + its ref); 'text' = raw prose.
       const text = op.mode === 'text'
         ? (target.innerText ?? '').replace(/\s+\n/g, '\n').trim()

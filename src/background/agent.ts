@@ -214,7 +214,9 @@ class Agent {
       state: {
         ...this.state,
         messages: this.state.messages.map((m) =>
-          m.kind === 'tool_activity' ? { ...m, thumb: undefined } : m,
+          // `result` lives canonically in the saved conversation — drop the (heavy) copy here and
+          // rehydrate it on reopen via `callId`. `thumb` is dropped for the same size reason.
+          m.kind === 'tool_activity' ? { ...m, thumb: undefined, result: undefined } : m,
         ),
       },
       conversation: serializeConversation(this.conversation),
@@ -382,6 +384,20 @@ class Agent {
     }
     // Tolerate old-schema entries that lack `messages`.
     if (!Array.isArray(restored.messages)) restored.messages = [];
+    // `result` was stripped on persist (it lives in the conversation) — rehydrate each tool row's
+    // response from the deserialized conversation by matching its LLM tool-call id.
+    const resultById = new Map<string, unknown>();
+    for (const m of this.conversation) {
+      if (m.role !== 'tool') continue;
+      for (const p of m.parts) {
+        if (p.type === 'tool_result') resultById.set(p.id, p.result);
+      }
+    }
+    restored.messages = restored.messages.map((m) =>
+      m.kind === 'tool_activity' && m.callId && resultById.has(m.callId)
+        ? { ...m, result: resultById.get(m.callId) }
+        : m,
+    );
     this.state = restored;
     this.emit();
   }
@@ -529,7 +545,7 @@ class Agent {
     // Granular tools — push a tool_activity message and dispatch.
     const activityId = newId('act');
     this.pushMessage({
-      id: activityId, kind: 'tool_activity', name, args,
+      id: activityId, kind: 'tool_activity', name, args, callId,
       status: 'pending', t: Date.now(),
       detail: labelFor(name, args),
     });
@@ -539,7 +555,7 @@ class Agent {
       const result = await this.dispatchGranular(name, args);
       const detail = detailFor(name, result) ?? labelFor(name, args);
       const thumb = name === 'screenshot' ? (result as { thumb?: string }).thumb : undefined;
-      this.updateMessage(activityId, { status: 'ok', detail, thumb } as Partial<UIMessage>);
+      this.updateMessage(activityId, { status: 'ok', detail, thumb, result } as Partial<UIMessage>);
       log.info(`  ✓ ${name}`, detail);
 
       if (name === 'screenshot') {
@@ -550,7 +566,7 @@ class Agent {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(`  ✗ ${name}`, msg);
-      this.updateMessage(activityId, { status: 'error', detail: msg } as Partial<UIMessage>);
+      this.updateMessage(activityId, { status: 'error', detail: msg, result: msg } as Partial<UIMessage>);
       if (msg === 'permission_denied') {
         // already failed via denyPermission path; return early
         return { result: msg, isError: true };
@@ -558,7 +574,6 @@ class Agent {
       return { result: msg, isError: true };
     } finally {
       void this.persistSnapshot('running');
-      void callId; // unused but kept for symmetry / future tracing
     }
   }
 
