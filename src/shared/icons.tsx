@@ -41,6 +41,7 @@ export const Ic = {
   Eye: make(<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>),
   Key: make(<><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><line x1="17" y1="6" x2="20" y2="9"/><line x1="14" y1="9" x2="17" y2="12"/></>),
   Refresh: make(<><polyline points="3 4 3 10 9 10"/><path d="M3 10a9 9 0 0 1 16-2"/><polyline points="21 20 21 14 15 14"/><path d="M21 14a9 9 0 0 1-16 2"/></>),
+  File: make(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></>),
 };
 
 export function Spark({ size = 18, color = 'currentColor', animate = true }: { size?: number; color?: string; animate?: boolean }) {

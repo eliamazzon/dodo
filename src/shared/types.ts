@@ -87,6 +87,7 @@ export type ToolName =
   | 'click'
   | 'type'
   | 'extract'
+  | 'generate_file'
   | 'plan_actions'
   | 'execute_actions';
 
@@ -160,7 +161,8 @@ export type UIMessage =
       status: 'pending' | 'allowed' | 'denied';
       t: number;
     }
-  | { id: string; kind: 'error'; text: string; t: number };
+  | { id: string; kind: 'error'; text: string; t: number }
+  | { id: string; kind: 'file_artifact'; filename: string; content: string; t: number };
 
 export type AgentState = {
   phase: AgentPhase;

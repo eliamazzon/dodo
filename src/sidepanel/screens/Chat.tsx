@@ -9,6 +9,7 @@ import { Markdown } from '../components/Markdown';
 import { PlanProposalCard } from '../cards/PlanProposalCard';
 import { ExecutionCard } from '../cards/ExecutionCard';
 import { PermissionCard } from '../cards/PermissionCard';
+import { FileArtifactCard } from '../cards/FileArtifactCard';
 import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
 
 const toolIcon = (name: ToolName) => {
@@ -260,6 +261,9 @@ function renderMessage(m: UIMessage, props: {
         />
       </div>
     );
+  }
+  if (m.kind === 'file_artifact') {
+    return <FileArtifactCard key={m.id} c={c} filename={m.filename} content={m.content}/>;
   }
   if (m.kind === 'error') {
     return (

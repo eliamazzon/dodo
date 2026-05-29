@@ -534,6 +534,14 @@ class Agent {
     callId: string,
     args: Record<string, unknown>,
   ): Promise<{ result: unknown; isError: boolean; screenshotBase64?: string }> {
+    // generate_file creates a file_artifact UIMessage; no tool_activity row.
+    if (name === 'generate_file') {
+      const filename = String(args.filename ?? 'file.txt');
+      const content  = String(args.content  ?? '');
+      this.pushMessage({ id: newId('file'), kind: 'file_artifact', filename, content, t: Date.now() });
+      return { result: { ok: true, filename }, isError: false };
+    }
+
     // plan_actions and execute_actions create their own rich UIMessage; granular tools push tool_activity.
     if (name === 'plan_actions') {
       return this.handlePlanActions(args);
