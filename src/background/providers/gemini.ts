@@ -115,6 +115,7 @@ export const GeminiProvider: ModelProvider = {
     }
     const data = (await res.json()) as {
       candidates?: { content?: { parts?: GeminiPart[] } }[];
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
     };
     const parts = data.candidates?.[0]?.content?.parts ?? [];
     const calls: { name: string; args: Record<string, unknown>; id: string; thoughtSignature?: string }[] = [];
@@ -131,7 +132,10 @@ export const GeminiProvider: ModelProvider = {
         textOut += p.text;
       }
     }
-    if (calls.length) return { kind: 'tool_call', calls };
-    return { kind: 'text', text: textOut };
+    const usage = data.usageMetadata
+      ? { input: data.usageMetadata.promptTokenCount ?? 0, output: data.usageMetadata.candidatesTokenCount ?? 0 }
+      : undefined;
+    if (calls.length) return { kind: 'tool_call', calls, usage };
+    return { kind: 'text', text: textOut, usage };
   },
 };

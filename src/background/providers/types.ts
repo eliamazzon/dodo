@@ -20,12 +20,15 @@ export type ChatRequest = {
   jsonResponse?: boolean;
 };
 
+export type TokenUsage = { input: number; output: number };
+
 export type ChatResponse =
   | {
       kind: 'tool_call';
       calls: { name: string; args: Record<string, unknown>; id: string; thoughtSignature?: string }[];
+      usage?: TokenUsage;
     }
-  | { kind: 'text'; text: string };
+  | { kind: 'text'; text: string; usage?: TokenUsage };
 
 export interface ModelProvider {
   id: string;

@@ -444,6 +444,9 @@ class Agent {
     if (!settings.apiKey) return this.fail('no api key configured — open settings to add your api key');
 
     let emptyTurns = 0;
+    let totalTokens = 0;
+    let llmTurns = 0;
+    const loopStartedAt = Date.now();
     for (let turn = 0; turn < 200 && !this.aborted; turn++) {
       log.info(`turn ${turn} → chat`, { messages: this.conversation.length });
       this.setState({ workingLabel: 'thinking' });
@@ -461,6 +464,10 @@ class Agent {
         return this.fail(e instanceof Error ? e.message : String(e));
       }
 
+      if (this.aborted) return;
+      llmTurns++;
+      if (res.usage) totalTokens += res.usage.input + res.usage.output;
+
       if (res.kind === 'text') {
         const text = res.text.trim();
         log.info(`turn ${turn} ← text`, text.slice(0, 200));
@@ -473,7 +480,13 @@ class Agent {
         }
         emptyTurns = 0;
         this.conversation.push({ role: 'assistant', parts: [{ type: 'text', text: res.text }] });
-        this.pushMessage({ id: newId('msg'), kind: 'assistant', text, t: Date.now() });
+        this.pushMessage({
+          id: newId('msg'), kind: 'assistant', text,
+          tokens: totalTokens || undefined,
+          turns: llmTurns,
+          elapsed: Date.now() - loopStartedAt,
+          t: Date.now(),
+        });
         return this.complete();
       }
 

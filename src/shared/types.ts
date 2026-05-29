@@ -116,7 +116,7 @@ export type ToolActivityStatus = 'pending' | 'ok' | 'error';
 
 export type UIMessage =
   | { id: string; kind: 'user'; text: string; t: number }
-  | { id: string; kind: 'assistant'; text: string; t: number }
+  | { id: string; kind: 'assistant'; text: string; tokens?: number; turns?: number; elapsed?: number; t: number }
   | {
       id: string;
       kind: 'tool_activity';
