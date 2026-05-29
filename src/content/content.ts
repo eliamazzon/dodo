@@ -506,6 +506,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
     if (op.op === 'type') {
       const el = resolveRef(op.selector) as HTMLInputElement | HTMLTextAreaElement | null;
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
+      const before = interactiveElements(false);
       el.focus();
       const desc = Object.getOwnPropertyDescriptor(
         el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
@@ -514,7 +515,9 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       desc?.set?.call(el, op.text);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      return { ok: true, data: { typed: op.text.length } };
+      await new Promise<void>((r) => setTimeout(r, 350));
+      const after = interactiveElements(true);
+      return { ok: true, data: { typed: op.text.length, diff: formatDiff(before, after) } };
     }
     if (op.op === 'extract') {
       const target = op.selector
