@@ -28,7 +28,8 @@ You drive the browser with these tools, one action at a time, inspecting the pag
   • screenshot() — capture the viewport as a JPEG (layout context, no refs).
   • navigate({url}) — go to a URL. Triggers a host-allowlist prompt if needed.
   • click({selector}) — click an element. Selector must be a \`data-sel\` ref from snapshot(). Returns a diff of what changed in the DOM (appeared/disappeared/aria changes), with fresh refs for anything that appeared.
-  • type({selector, text}) — type into an input/textarea, identified by a \`data-sel\` ref.
+  • type({selector, text}) — type into an input/textarea/rich-text editor (contentEditable), identified by a \`data-sel\` ref. Returns the resulting \`value\`; if the diff is empty but \`value\` shows your text, it worked — do NOT retry. type() does not submit. For an input/textarea it sets the value; for a contentEditable editor it INSERTS at the cursor (it does not erase existing text). A message/document compose BODY is usually a contentEditable editor, often inside an iframe — extract({mode:"map"}) lists it (it descends into same-origin iframes; the editor appears flagged \`contenteditable\` with its id), so map → type() into that ref. Don't hunt for it with repeated snapshots. Write the WHOLE body in a SINGLE type() call (use \\n for line breaks); composing it across several type()/toolbar-click cycles is unreliable and not worth it — toolbar formatting (bold/lists) does not apply cleanly via clicks.
+  • press({key, selector?}) — dispatch a real key press (Enter, Tab, Escape, Backspace, Arrow keys). Use it ONLY when an action needs a keystroke: Enter to COMMIT a typed value that becomes a chip/selection (a recipient/email/tag in a To field, or an autocomplete/combobox/search pick), or Escape to dismiss a menu/dialog. Omit \`selector\` to press on the currently focused element (e.g. right after the type() that needs committing). Do NOT press after typing into a plain text field (subject, body, search-as-you-type, normal forms) — that text is already entered. Do NOT use Tab just to "move to the next field"; locate the target element via snapshot/extract and type() into it directly.
   • extract({selector?, mode?}) — survey or read the page. mode="map" (default) returns a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label, covering the whole page (or a scoped region) — use it to enumerate lists/grids/menus/results and get refs for all of them. mode="text" returns the full readable page text for reading prose/tables/prices.
 
 The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
@@ -40,6 +41,7 @@ RULES:
 - Format your answer to fit the task. If the user asks for a list, output a list. If they ask a yes/no, answer briefly. If they ask for a table, use markdown. Never compress a list into a count or summary unless explicitly asked.
 - When the user asks a follow-up that you can answer from prior turns' extracted text, just answer — don't re-browse.
 - If a click/type fails with "no element matches", snapshot again — the page may have changed.
+- A typed value that must become a chip/selection (recipient/email/tag in a To/CC field, or an autocomplete/combobox pick) is NOT committed until you press({key:"Enter"}). If such a type() returned a non-empty \`value\` but no chip/result appeared, do NOT retype — press({key:"Enter"}) once to commit. Plain text fields (subject, message body, ordinary form inputs) need NO press — once type() returns your \`value\`, that field is done; move on.
 - Use the datetime/location context to produce accurate results.
 - Never navigate to a host not in the allowlist without going through the navigate() tool's permission flow.`;
 
@@ -648,6 +650,15 @@ class Agent {
       if (!r.ok) throw new Error(r.error);
       return r.data;
     }
+    if (name === 'press') {
+      const r = await runContentOp(tab.id, {
+        op: 'press',
+        key: String(args.key ?? ''),
+        selector: args.selector ? String(args.selector) : undefined,
+      });
+      if (!r.ok) throw new Error(r.error);
+      return r.data;
+    }
     if (name === 'extract') {
       const r = await runContentOp(tab.id, {
         op: 'extract',
@@ -1004,6 +1015,7 @@ function labelFor(name: ToolName, args: Record<string, unknown>): string {
   if (name === 'snapshot') return args.element ? `expand ${args.element}` : 'read page DOM';
   if (name === 'click') return `click ${args.selector ?? ''}`;
   if (name === 'type') return `type into ${args.selector ?? ''}`;
+  if (name === 'press') return `press ${args.key ?? ''}`;
   if (name === 'extract') {
     const verb = args.mode === 'text' ? 'read' : 'map';
     return args.selector ? `${verb} ${args.selector}` : `${verb} page`;

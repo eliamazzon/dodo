@@ -86,6 +86,7 @@ export type ToolName =
   | 'navigate'
   | 'click'
   | 'type'
+  | 'press'
   | 'extract'
   | 'generate_file'
   | 'plan_actions'

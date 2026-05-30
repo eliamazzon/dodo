@@ -80,14 +80,26 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   },
   {
     name: 'type',
-    description: 'Type text into an input or textarea identified by a `data-sel` ref from snapshot().',
+    description: 'Type text into an input, textarea, or rich-text editor (contentEditable) identified by a `data-sel` ref. Returns the resulting `value`/text — if the diff is empty but `value` shows your text, the type worked; do NOT retry. Typing does NOT submit. For an input/textarea it sets the value; for a contentEditable editor it INSERTS at the cursor (does not erase existing text). A message/document compose BODY is usually a contentEditable editor, often inside an iframe: use extract({mode:"map"}) to find it (it lists elements inside same-origin iframes; the editor is flagged `contenteditable` with its id), then type() into that ref — do not hunt with repeated snapshots. Write the WHOLE body in ONE type() call (use \\n for line breaks); do not split it across several type()/toolbar-click cycles — toolbar formatting via clicks is unreliable. Only follow type() with press({key:"Enter"}) when the value must become a chip/selection (recipient/tag) or pick an autocomplete option — NOT for plain subject/body text.',
     parameters: {
       type: 'object',
       properties: {
-        selector: { type: 'string', description: 'A `data-sel` ref from snapshot() for the input/textarea (e.g. "e42").' },
+        selector: { type: 'string', description: 'A `data-sel` ref from snapshot() for the input/textarea/editor (e.g. "e42").' },
         text: { type: 'string', description: 'Text to type.' },
       },
       required: ['selector', 'text'],
+    },
+  },
+  {
+    name: 'press',
+    description: 'Dispatch a real key press. Use it ONLY when a keystroke is needed: Enter to COMMIT a typed value into a chip/selection (recipient/email/tag in a To field) or to confirm an autocomplete/combobox pick, or Escape to dismiss a menu/dialog. Do NOT press after typing into a plain text field (subject, body, normal form input) — that text is already entered. Do NOT use Tab just to move between fields; find the next element with snapshot/extract and type() into it. Without a selector it presses on the currently focused element (e.g. right after a type()); pass a selector to focus an element first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'], description: 'Key to press.' },
+        selector: { type: 'string', description: 'Optional `data-sel` ref to focus before pressing. Omit to press on the currently focused element.' },
+      },
+      required: ['key'],
     },
   },
   {

@@ -19,6 +19,7 @@ const toolIcon = (name: ToolName) => {
     case 'snapshot': return <Ic.List size={12}/>;
     case 'click': return <Ic.Pointer size={12}/>;
     case 'type': return <Ic.Bolt size={12}/>;
+    case 'press': return <Ic.Key size={12}/>;
     case 'extract': return <Ic.Eye size={12}/>;
     default: return <Ic.Stack size={12}/>;
   }

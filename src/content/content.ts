@@ -9,8 +9,10 @@ declare global {
     [SENTINEL]?: boolean;
     // Ref registry — maps the short `data-sel` tokens (e.g. "e42") the LLM sees back to the real
     // element/selector. Lives on `window` (not module scope) so it survives content-script
-    // re-injection between the snapshot op and the later click/type op.
-    __dodo_refs__?: Map<string, { ref: WeakRef<Element>; selector: string }>;
+    // re-injection between the snapshot op and the later click/type op. `doc` is the element's
+    // owner document (the top document or a same-origin iframe's) so the selector fallback re-queries
+    // in the right scope — `document.querySelector` can't reach into iframe documents.
+    __dodo_refs__?: Map<string, { ref: WeakRef<Element>; selector: string; doc: WeakRef<Document> }>;
     __dodo_refSeq__?: number;
   }
 }
@@ -98,7 +100,7 @@ function bestSelector(el: Element): string {
 // the HTML small and avoids the LLM having to transcribe long/escaped selectors verbatim.
 const REF_CAP = 4000;
 
-function refRegistry(): Map<string, { ref: WeakRef<Element>; selector: string }> {
+function refRegistry(): Map<string, { ref: WeakRef<Element>; selector: string; doc: WeakRef<Document> }> {
   if (!window.__dodo_refs__) window.__dodo_refs__ = new Map();
   return window.__dodo_refs__;
 }
@@ -107,7 +109,7 @@ function assignRef(el: Element): string {
   const reg = refRegistry();
   const seq = (window.__dodo_refSeq__ = (window.__dodo_refSeq__ ?? 0) + 1);
   const ref = `e${seq}`;
-  reg.set(ref, { ref: new WeakRef(el), selector: bestSelector(el) });
+  reg.set(ref, { ref: new WeakRef(el), selector: bestSelector(el), doc: new WeakRef(el.ownerDocument) });
   // Bound memory — Map preserves insertion order, so the first keys are the oldest.
   while (reg.size > REF_CAP) {
     const oldest = reg.keys().next().value;
@@ -125,7 +127,14 @@ function resolveRef(token: string): Element | null {
     if (entry) {
       const live = entry.ref.deref();
       if (live && live.isConnected) return live;
-      return document.querySelector(entry.selector);
+      // Fallback: re-query the stored selector in the element's owning document (may be a
+      // same-origin iframe doc that the top `document` can't reach).
+      const doc = entry.doc.deref();
+      try {
+        return (doc ?? document).querySelector(entry.selector);
+      } catch {
+        return null;
+      }
     }
   }
   try {
@@ -135,10 +144,30 @@ function resolveRef(token: string): Element | null {
   }
 }
 
+// querySelectorAll that also descends into same-origin iframe documents — `querySelectorAll` alone
+// stops at iframe boundaries, so rich-text editors (Proton/Gmail Rooster, etc.) rendered inside an
+// iframe would be invisible to snapshot/extract/click/type. Cross-origin frames throw on
+// `contentDocument` access and are skipped. Depth-bounded to avoid pathological ad-iframe trees.
+function queryAllDeep(root: ParentNode, selector: string, depth = 3): Element[] {
+  const out = Array.from(root.querySelectorAll(selector));
+  if (depth <= 0) return out;
+  const frames = root.querySelectorAll('iframe');
+  for (const frame of Array.from(frames)) {
+    let childDoc: Document | null = null;
+    try {
+      childDoc = (frame as HTMLIFrameElement).contentDocument;
+    } catch {
+      childDoc = null; // cross-origin — inaccessible
+    }
+    if (childDoc) out.push(...queryAllDeep(childDoc, selector, depth - 1));
+  }
+  return out;
+}
+
 // Visible elements carrying an identifying hook the model's selector might have aimed at. Used only
 // on the error path, so the full-document scan is acceptable.
 function identifiableElements(): Element[] {
-  return Array.from(document.querySelectorAll('[id], [class], [data-testid], [role]')).filter(isVisible);
+  return queryAllDeep(document, '[id], [class], [data-testid], [role]').filter(isVisible);
 }
 
 // When a selector/ref fails to resolve, suggest the closest live elements — with FRESH refs — so the
@@ -215,7 +244,7 @@ const INTERACTIVE_SEL = [
 // and that the click diff compares before/after. `root` scopes the search (defaults to the
 // whole document) so the extract map can survey a single region.
 function interactiveCandidates(root: ParentNode = document): Element[] {
-  return Array.from(root.querySelectorAll(INTERACTIVE_SEL))
+  return queryAllDeep(root, INTERACTIVE_SEL)
     .filter(isVisible)
     .filter((el) => {
       // <label> elements are only useful when they wrap a hidden input (custom checkbox/radio).
@@ -317,9 +346,18 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
     const open = `<${tag}${attrsFor(el)}>`;
     const close = `</${tag}>`;
 
-    const childEls = Array.from(el.children).filter(
-      (c) => !SKIP_TAGS.has(c.tagName.toLowerCase()) && isVisible(c),
-    );
+    // For a same-origin iframe, descend into its document body so embedded rich-text editors
+    // (Proton/Gmail Rooster) are part of the snapshot. Cross-origin frames have no reachable body.
+    let childEls: Element[];
+    if (tag === 'iframe') {
+      let body: HTMLElement | null = null;
+      try { body = (el as HTMLIFrameElement).contentDocument?.body ?? null; } catch { body = null; }
+      childEls = body ? [body] : [];
+    } else {
+      childEls = Array.from(el.children).filter(
+        (c) => !SKIP_TAGS.has(c.tagName.toLowerCase()) && isVisible(c),
+      );
+    }
 
     if (depth <= 0) {
       const text = ((el as HTMLElement).innerText || '').trim().replace(/\s+/g, ' ');
@@ -475,6 +513,13 @@ function extractMap(root: Element): string {
       const v = (el as HTMLInputElement | HTMLTextAreaElement).value;
       if (v) parts.push(`value="${v.slice(0, 60)}"`);
     }
+    // Rich-text editors (email/doc compose bodies, often inside an iframe) are bare contentEditable
+    // <div>s with no label — flag them + their id so the model can find "the editor" and type() into it.
+    if ((el as HTMLElement).isContentEditable) {
+      parts.push('contenteditable');
+      const id = (el as HTMLElement).id;
+      if (id) parts.push(`id=${id}`);
+    }
     if (tag === 'a') {
       const href = el.getAttribute('href');
       if (href) parts.push(`href=${href.slice(0, 80)}`);
@@ -487,6 +532,19 @@ function extractMap(root: Element): string {
   }
   return out || '(no interactive elements found)';
 }
+
+// Named keys the press() tool can dispatch, with the standard key/code/keyCode each carries. Covers
+// the common commit/submit/dismiss/navigate keys; arbitrary character typing goes through type().
+const KEY_META: Record<string, { key: string; code: string; keyCode: number }> = {
+  Enter:      { key: 'Enter',      code: 'Enter',       keyCode: 13 },
+  Tab:        { key: 'Tab',        code: 'Tab',         keyCode: 9 },
+  Escape:     { key: 'Escape',     code: 'Escape',      keyCode: 27 },
+  Backspace:  { key: 'Backspace',  code: 'Backspace',   keyCode: 8 },
+  ArrowUp:    { key: 'ArrowUp',    code: 'ArrowUp',     keyCode: 38 },
+  ArrowDown:  { key: 'ArrowDown',  code: 'ArrowDown',   keyCode: 40 },
+  ArrowLeft:  { key: 'ArrowLeft',  code: 'ArrowLeft',   keyCode: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight',  keyCode: 39 },
+};
 
 async function handle(op: ContentOp): Promise<ContentResult> {
   console.log('%c[dodo:content]', 'color:#6b4ea3;font-weight:600', op);
@@ -504,20 +562,81 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       return { ok: true, data: { clicked: op.selector, diff: formatDiff(before, after) } };
     }
     if (op.op === 'type') {
-      const el = resolveRef(op.selector) as HTMLInputElement | HTMLTextAreaElement | null;
+      const el = resolveRef(op.selector) as HTMLElement | null;
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const before = interactiveElements(false);
       el.focus();
-      const desc = Object.getOwnPropertyDescriptor(
-        el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
-        'value',
-      );
-      desc?.set?.call(el, op.text);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+      if (isField) {
+        // Native value setter so React/controlled inputs pick up the change.
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, op.text);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      } else if (el.isContentEditable) {
+        // Rich-text editor (e.g. Proton/Gmail Rooster, possibly inside a same-origin iframe).
+        // execCommand runs against the element's OWN document and emits the input/beforeinput the
+        // editor listens for. ownerDocument may be the iframe's document, not the top one.
+        // INSERT at the caret — do NOT select-all-then-insert (that REPLACES the whole body, so
+        // successive type()s each wipe the previous text). When the caret isn't already inside this
+        // editor, collapse to the START so inserted text lands above any signature block.
+        const doc = el.ownerDocument;
+        const sel = doc.getSelection();
+        const caretInEditor = !!sel && sel.rangeCount > 0 && el.contains(sel.anchorNode);
+        if (sel && !caretInEditor) {
+          const range = doc.createRange();
+          range.selectNodeContents(el);
+          range.collapse(true); // collapse to start: insert, don't replace
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        const inserted = doc.execCommand?.('insertText', false, op.text);
+        if (!inserted) {
+          el.textContent = (el.textContent ?? '') + op.text;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+      } else {
+        return { ok: false, error: `element ${op.selector} is not typeable (not an input, textarea, or contentEditable)` };
+      }
       await new Promise<void>((r) => setTimeout(r, 350));
       const after = interactiveElements(true);
-      return { ok: true, data: { typed: op.text.length, diff: formatDiff(before, after) } };
+      // Read the value AFTER the settle so async/controlled resets are reflected: typing usually
+      // produces no element add/remove (the diff stays empty), so `value` is the signal that the
+      // text landed and the model needn't retry.
+      const value = isField ? (el as HTMLInputElement | HTMLTextAreaElement).value : (el.textContent ?? '');
+      // A non-empty type that left the field empty means it rejected the programmatic write — almost
+      // always a controlled search/combobox that must be opened/activated first. Tell the model so it
+      // tries a different move instead of re-typing identically (the observed failure loop).
+      const rejected = op.text.trim().length > 0 && value.length === 0;
+      return {
+        ok: true,
+        data: {
+          typed: op.text.length,
+          value: value.slice(0, 200),
+          diff: formatDiff(before, after),
+          ...(rejected ? { note: "the field is empty after typing — it rejected the text. This is usually an inert/collapsed search or combobox: clicking or re-typing into THIS input does nothing. Instead click the adjacent TRIGGER — a nearby \"Search\" button/icon or the surrounding control, NOT this input — to open the real search panel, then type into the NEW input that appears there. Do not re-type into this same field." } : {}),
+        },
+      };
+    }
+    if (op.op === 'press') {
+      const target = (op.selector ? resolveRef(op.selector) : document.activeElement) as HTMLElement | null;
+      if (!target) return { ok: false, error: op.selector
+        ? `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates())
+        : 'no element is focused — pass a selector to press a key on a specific element' };
+      const before = interactiveElements(false);
+      if (op.selector) target.focus();
+      const meta = KEY_META[op.key];
+      if (!meta) return { ok: false, error: `unsupported key "${op.key}" — use one of: ${Object.keys(KEY_META).join(', ')}` };
+      const focused = (target.ownerDocument.activeElement as HTMLElement | null) ?? target;
+      for (const type of ['keydown', 'keyup'] as const) {
+        focused.dispatchEvent(new KeyboardEvent(type, {
+          key: meta.key, code: meta.code, keyCode: meta.keyCode, which: meta.keyCode,
+          bubbles: true, cancelable: true,
+        }));
+      }
+      await new Promise<void>((r) => setTimeout(r, 350));
+      const after = interactiveElements(true);
+      return { ok: true, data: { pressed: op.key, diff: formatDiff(before, after) } };
     }
     if (op.op === 'extract') {
       const target = op.selector
