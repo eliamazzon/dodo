@@ -326,14 +326,14 @@ class Agent {
 
   // Halt the current step but keep the conversation alive so the user can follow up.
   // For a full wipe (new chat), call reset() — bound to the panel's "new task" button.
-  stop() {
+  async stop() {
     log.info('stop');
     this.aborted = true;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
     const wasRunning = this.taskId
       && this.state.phase !== 'idle' && this.state.phase !== 'complete' && this.state.phase !== 'error';
-    void setTabWorking(getPinnedTabId(), false);
+    await setTabWorking(getPinnedTabId(), false); // await — see complete()
     this.setState({
       phase: 'complete',
       workingLabel: undefined,
@@ -436,7 +436,7 @@ class Agent {
     // Don't treat a denial as an error — halt the run and leave the conversation alive (phase
     // 'complete') so the user can redirect with a follow-up message. stop() resolves the pending
     // permission promise (false), sets `aborted` so the loop exits, and persists.
-    this.stop();
+    await this.stop();
   }
 
   private waitForPermission(host: string, reason: string): Promise<boolean> {
@@ -553,7 +553,7 @@ class Agent {
       if (abortedMidBatch) return;
     }
 
-    if (!this.aborted) this.fail('exceeded max turns');
+    if (!this.aborted) await this.fail('exceeded max turns');
   }
 
   private async dispatchToolCall(
@@ -1035,17 +1035,20 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
     };
   }
 
-  private complete() {
+  private async complete() {
     log.info('complete');
-    void setTabWorking(getPinnedTabId(), false);
+    // Await so the MV3 service worker stays alive until the content script has cleared the working
+    // indicator + faded the on-page cursor overlay; a fire-and-forget `void` here can be dropped if
+    // the worker suspends right after the run ends (the overlay would then never hide).
+    await setTabWorking(getPinnedTabId(), false);
     this.setState({ phase: 'complete', workingLabel: undefined });
     notify('dodo · done', 'task complete');
     void this.persistSnapshot('done');
   }
 
-  private fail(msg: string) {
+  private async fail(msg: string) {
     log.err('fail', msg);
-    void setTabWorking(getPinnedTabId(), false);
+    await setTabWorking(getPinnedTabId(), false); // await — see complete()
     this.setState({ phase: 'error', errorMsg: msg, workingLabel: undefined });
     this.pushMessage({ id: newId('err'), kind: 'error', text: msg, t: Date.now() });
     notify('dodo · halted', truncate(msg, 140));

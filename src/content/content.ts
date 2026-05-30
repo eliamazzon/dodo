@@ -341,6 +341,7 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
   };
 
   const walk = (el: Element, depth: number) => {
+    if (el.hasAttribute(OVERLAY_ATTR)) return; // never serialize our own on-page cursor overlay
     if (out.length >= cap) return; // budget blown — stop descending; the sibling loop notes the omission
     const tag = el.tagName.toLowerCase();
     const open = `<${tag}${attrsFor(el)}>`;
@@ -568,11 +569,245 @@ function setWorking(working: boolean): ContentResult {
         if (!document.title.startsWith(WORK_PREFIX)) document.title = WORK_PREFIX + document.title;
       }, 1000);
     }
+    showThinking(true); // run begun — show "Thinking…" and reset the cursor for a clean first action
   } else {
     if (workTitleTimer != null) { clearInterval(workTitleTimer); workTitleTimer = null; }
     if (document.title.startsWith(WORK_PREFIX)) document.title = document.title.slice(WORK_PREFIX.length);
+    hideOverlay(); // agent stopped/finished/errored — fade cursor + pill out
   }
   return { ok: true, data: { working } };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-page interaction cursor — a single circle that glides to each click/type/press
+// target so a human watching the tab can follow what the agent is doing. Ported from
+// the "DODO Ripple Pulse" design (single gliding cursor; no motion trail). It lives in
+// a CLOSED shadow root mounted on the top document: style-isolated from the page, and
+// invisible to the agent's own snapshot/extract (which walk light DOM only).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const OVERLAY_ATTR = 'data-dodo-overlay';
+const ACCENT = '#6b4ea3';
+const GLIDE_MS = 300; // fast glide; the handler waits this out (distance-scaled) before acting
+
+const OVERLAY_CSS = `
+  .layer{position:fixed;inset:0;overflow:hidden;pointer-events:none}
+  .cur-pos{position:absolute;left:0;top:0;
+    transform:translate(var(--x,-100px),var(--y,-100px));
+    transition:transform ${GLIDE_MS}ms cubic-bezier(.45,.02,.2,1)}
+  .cur-dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);
+    width:21px;height:21px;border-radius:50%;box-sizing:border-box;
+    border:2px solid ${ACCENT};background:rgba(107,78,163,.14);
+    display:flex;align-items:center;justify-content:center}
+  .cur-dot.tap{animation:cur-tap .44s cubic-bezier(.3,.7,.3,1)}
+  @keyframes cur-tap{
+    0%{transform:translate(-50%,-50%) scale(1)}
+    42%{transform:translate(-50%,-50%) scale(.58);background:rgba(107,78,163,.34)}
+    100%{transform:translate(-50%,-50%) scale(1)}
+  }
+  /* per-action glyph — click shows nothing (clean ring), type/press show their mark */
+  .glyph{display:none}
+  .cur-dot[data-action="type"] .g-type{display:block}
+  .cur-dot[data-action="press"] .g-press{display:block}
+  .flash{position:absolute;box-sizing:border-box;border:2px solid ${ACCENT};
+    background:rgba(107,78,163,.07);animation:flash 620ms ease-out forwards}
+  @keyframes flash{0%{opacity:0}14%{opacity:1}100%{opacity:0}}
+  .pill{position:fixed;left:16px;bottom:16px;display:none;align-items:center;gap:9px;
+    padding:8px 14px 8px 11px;border-radius:999px;background:rgba(26,24,19,.9);color:#f3efe9;
+    font:600 12.5px/1 'JetBrains Mono',ui-monospace,monospace;letter-spacing:.01em;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    box-shadow:0 8px 24px rgba(0,0,0,.28);max-width:60vw}
+  .pill.show{display:flex}
+  .tag{flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+    padding:2px 7px;border-radius:5px;background:rgba(165,131,218,.22);color:#c7aef0}
+  .cap{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .spark{flex:none}
+  .dots{display:none}
+  /* thinking mode — hide the action tag, show "Thinking" + animated dots, pulse the spark */
+  .pill.thinking .tag{display:none}
+  .pill.thinking .dots{display:inline-flex;gap:2px}
+  .pill.thinking .spark{animation:spark-pulse 1.2s ease-in-out infinite}
+  .dots i{width:3px;height:3px;border-radius:50%;background:#c7aef0;display:inline-block;
+    animation:dot-blink 1.4s infinite}
+  .dots i:nth-child(2){animation-delay:.2s}
+  .dots i:nth-child(3){animation-delay:.4s}
+  @keyframes dot-blink{0%,60%,100%{opacity:.25}30%{opacity:1}}
+  @keyframes spark-pulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.1)}}
+`;
+
+interface Overlay {
+  host: HTMLElement;     // shadow host — opacity fades the whole overlay on stop
+  pos: HTMLElement;      // .cur-pos — owns the glide
+  dot: HTMLElement;      // .cur-dot — the circle (taps), carries data-action glyph
+  flashBox: HTMLElement; // container the outline boxes spawn into
+  pill: HTMLElement;     // caption pill
+  tag: HTMLElement;      // action chip
+  cap: HTMLElement;      // caption text
+  thinkTimer: ReturnType<typeof setTimeout> | null; // flips the pill to "Thinking…" between actions
+}
+
+// Get-or-create the overlay. Module state resets on each content-script re-injection, so the
+// element refs are stashed on the host DOM node (which persists) and retrieved on later ops.
+function getOverlay(): Overlay | null {
+  if (!document.body) return null;
+  const existing = document.querySelector(`[${OVERLAY_ATTR}]`) as (HTMLElement & { __dodo?: Overlay }) | null;
+  if (existing?.__dodo) return existing.__dodo;
+
+  const host = document.createElement('div');
+  host.setAttribute(OVERLAY_ATTR, '');
+  host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647;opacity:0;transition:opacity .28s ease';
+  const root = host.attachShadow({ mode: 'closed' });
+  root.innerHTML = `
+    <style>${OVERLAY_CSS}</style>
+    <div class="layer">
+      <div class="flashes"></div>
+      <div class="cur-pos"><div class="cur-dot">
+        <svg class="glyph g-type" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${ACCENT}"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19"/><path d="M8.5 5h7M8.5 19h7"/>
+        </svg>
+        <svg class="glyph g-press" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="${ACCENT}"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="8.5 9 4.5 13 8.5 17"/><path d="M4.5 13h11a3.5 3.5 0 0 0 3.5-3.5V6"/>
+        </svg>
+      </div></div>
+    </div>
+    <div class="pill">
+      <svg class="spark" width="15" height="15" viewBox="0 0 24 24" fill="#a583da" aria-hidden="true">
+        <path d="M12 2l1.8 5.6L19.5 9l-4.6 3.4L16.6 18 12 14.7 7.4 18l1.7-5.6L4.5 9l5.7-1.4z"/>
+      </svg>
+      <span class="tag"></span>
+      <span class="cap"></span>
+      <span class="dots"><i></i><i></i><i></i></span>
+    </div>`;
+  const o: Overlay = {
+    host,
+    pos: root.querySelector('.cur-pos') as HTMLElement,
+    dot: root.querySelector('.cur-dot') as HTMLElement,
+    flashBox: root.querySelector('.flashes') as HTMLElement,
+    pill: root.querySelector('.pill') as HTMLElement,
+    tag: root.querySelector('.tag') as HTMLElement,
+    cap: root.querySelector('.cap') as HTMLElement,
+    thinkTimer: null,
+  };
+  document.body.appendChild(host);
+  (host as HTMLElement & { __dodo?: Overlay }).__dodo = o;
+  return o;
+}
+
+// An element's rect in the TOP document's viewport. The content script runs in the top frame but a
+// target may live in a same-origin iframe, where getBoundingClientRect() is iframe-local — walk the
+// frame chain adding each frame's offset so the cursor lands in the right place.
+function viewportRectInTop(el: Element): { x: number; y: number; w: number; h: number } {
+  const r = el.getBoundingClientRect();
+  let x = r.left, y = r.top;
+  let win: Window | null = el.ownerDocument.defaultView;
+  while (win && win !== window.top) {
+    let frame: Element | null = null;
+    try { frame = win.frameElement; } catch { frame = null; } // cross-origin — stop walking
+    if (!frame) break;
+    const fr = frame.getBoundingClientRect();
+    x += fr.left; y += fr.top;
+    win = frame.ownerDocument.defaultView;
+  }
+  return { x, y, w: r.width, h: r.height };
+}
+
+// Short accessible name for the caption pill.
+function elementLabel(el: Element): string {
+  const he = el as HTMLElement;
+  const aria = he.getAttribute('aria-label');
+  const text = (he.innerText || he.textContent || '').trim().replace(/\s+/g, ' ');
+  const raw = aria?.trim() || text || he.getAttribute('placeholder')?.trim()
+    || (he as HTMLInputElement).value?.trim() || he.tagName.toLowerCase();
+  return raw.slice(0, 40);
+}
+
+const MOD_SYM: Record<string, string> = { Meta: '⌘', Control: '⌃', Alt: '⌥', Shift: '⇧' };
+function pressLabel(key: string, mods: string[]): string {
+  return mods.map((m) => MOD_SYM[m] ?? m).join('') + (key.length === 1 ? key.toUpperCase() : key);
+}
+
+// Glide the cursor to `el`, then resolve once it has (roughly) arrived so the caller acts in sync.
+// Fire-and-forget for visuals: it never throws and never changes the handler's result.
+function showCursor(action: 'click' | 'type' | 'press', el: Element, label: string): Promise<void> {
+  let o: Overlay | null;
+  try { o = getOverlay(); } catch { o = null; }
+  if (!o) return Promise.resolve();
+  const { x, y, w, h } = viewportRectInTop(el);
+  const cx = x + w / 2, cy = y + h / 2;
+
+  const prevX = parseFloat(o.pos.style.getPropertyValue('--x')) || cx;
+  const prevY = parseFloat(o.pos.style.getPropertyValue('--y')) || cy;
+  const dist = Math.hypot(cx - prevX, cy - prevY);
+  const diag = Math.hypot(window.innerWidth, window.innerHeight) || 1000;
+  const lead = Math.round(GLIDE_MS * Math.min(1, dist / diag));
+
+  o.host.style.opacity = '1'; // ensure visible (a prior stop may have faded it out)
+  const hadPos = o.pos.style.getPropertyValue('--x') !== '';
+  if (!hadPos) o.pos.style.transition = 'none'; // first placement: snap, don't glide in from the corner
+  o.pos.style.setProperty('--x', cx + 'px');
+  o.pos.style.setProperty('--y', cy + 'px');
+  if (!hadPos) { void o.pos.offsetWidth; o.pos.style.transition = ''; }
+
+  o.dot.dataset.action = action;       // swap the in-cursor glyph (type/press; click = empty ring)
+  o.pill.classList.remove('thinking'); // show the action label, not "Thinking…"
+  o.tag.textContent = action.toUpperCase();
+  o.cap.textContent = label;
+  o.pill.classList.add('show');
+  if (o.thinkTimer) clearTimeout(o.thinkTimer);
+
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      if (action !== 'type') { // click/press tap; type rests
+        o!.dot.classList.remove('tap');
+        void o!.dot.offsetWidth; // restart the keyframe animation
+        o!.dot.classList.add('tap');
+      }
+      const fl = document.createElement('div');
+      fl.className = 'flash';
+      const pad = 3;
+      fl.style.cssText = `left:${x - pad}px;top:${y - pad}px;width:${w + 2 * pad}px;height:${h + 2 * pad}px;border-radius:10px`;
+      o!.flashBox.appendChild(fl);
+      setTimeout(() => fl.remove(), 700);
+      // After the action's label has shown a beat, drift into "Thinking…" — the real gap before the
+      // next action is the agent reasoning. The next action (or a stop) clears this.
+      o!.thinkTimer = setTimeout(() => showThinking(), 900);
+      resolve();
+    }, lead);
+  });
+}
+
+// Put the pill into its animated "Thinking…" state. `resetPos` (run start) snaps the cursor back
+// off-screen — with the transition disabled so it doesn't glide in from last run's position — so the
+// first action snaps onto its target instead of flying across the page. The mid-action thinkTimer
+// calls this WITHOUT resetPos, leaving the cursor resting where it is.
+function showThinking(resetPos = false): void {
+  let o: Overlay | null;
+  try { o = getOverlay(); } catch { o = null; }
+  if (!o) return;
+  if (resetPos) {
+    o.pos.style.transition = 'none';
+    o.pos.style.removeProperty('--x');
+    o.pos.style.removeProperty('--y');
+    void o.pos.offsetWidth;
+    o.pos.style.transition = '';
+  }
+  o.host.style.opacity = '1';
+  if (o.thinkTimer) { clearTimeout(o.thinkTimer); o.thinkTimer = null; }
+  o.cap.textContent = 'Thinking';
+  o.pill.classList.add('thinking', 'show');
+}
+
+// Fade the whole overlay out when the agent stops/finishes — cursor and pill together, in place, via
+// the host's opacity transition. The host stays in the DOM (opacity 0) so a quick restart just fades
+// it back in; the next run's `showThinking(true)` resets the cursor position.
+function hideOverlay(): void {
+  const host = document.querySelector(`[${OVERLAY_ATTR}]`) as (HTMLElement & { __dodo?: Overlay }) | null;
+  if (!host?.__dodo) return;
+  const o = host.__dodo;
+  if (o.thinkTimer) { clearTimeout(o.thinkTimer); o.thinkTimer = null; }
+  host.style.opacity = '0';
 }
 
 async function handle(op: ContentOp): Promise<ContentResult> {
@@ -586,6 +821,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const before = interactiveElements(false);
       (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' });
+      await showCursor('click', el, elementLabel(el)); // glide the on-page cursor over, then click
       (el as HTMLElement).click();
       // Let the page settle — clicks that open dropdowns/menus/dialogs need a beat before
       // the post-click snapshot, otherwise the new overlay items aren't in the DOM yet.
@@ -598,6 +834,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const before = interactiveElements(false);
       el.focus();
+      await showCursor('type', el, op.text ? `"${op.text.slice(0, 38)}"` : 'type');
       const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
       if (isField) {
         // Native value setter so React/controlled inputs pick up the change.
@@ -659,6 +896,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (op.selector) target.focus();
       const meta = KEY_META[op.key];
       if (!meta) return { ok: false, error: `unsupported key "${op.key}" — use one of: ${Object.keys(KEY_META).join(', ')}` };
+      await showCursor('press', target, pressLabel(op.key, op.modifiers ?? []));
       const mods = op.modifiers ?? [];
       const modInit = {
         metaKey:  mods.includes('Meta'),

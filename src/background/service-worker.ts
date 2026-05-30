@@ -52,7 +52,7 @@ chrome.runtime.onConnect.addListener((port) => {
         void agent.rejectExecution(msg.messageId);
         break;
       case 'stop':
-        agent.stop();
+        await agent.stop();
         break;
       case 'allow_host':
         await agent.allowHost(msg.host, msg.remember);
