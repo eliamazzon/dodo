@@ -24,7 +24,8 @@ export type ContentOp =
   | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[] } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
   | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
-  | { op: 'snapshot_structured' }; // structured elements[] — kept for the disabled planner path
+  | { op: 'snapshot_structured' } // structured elements[] — kept for the disabled planner path
+  | { op: 'set_working'; working: boolean }; // toggle the "agent is here" title prefix on this tab
 
 export type ContentResult =
   | { ok: true; data: unknown }

@@ -555,9 +555,32 @@ const KEY_META: Record<string, { key: string; code: string; keyCode: number }> =
   z: { key: 'z', code: 'KeyZ', keyCode: 90 },
 };
 
+// Working indicator: prefix document.title so the agent's active tab is recognisable in the tab
+// strip. Re-applied on an interval because SPAs rewrite document.title as they navigate/update.
+const WORK_PREFIX = '🟢 ';
+let workTitleTimer: ReturnType<typeof setInterval> | null = null;
+
+function setWorking(working: boolean): ContentResult {
+  if (working) {
+    if (!document.title.startsWith(WORK_PREFIX)) document.title = WORK_PREFIX + document.title;
+    if (workTitleTimer == null) {
+      workTitleTimer = setInterval(() => {
+        if (!document.title.startsWith(WORK_PREFIX)) document.title = WORK_PREFIX + document.title;
+      }, 1000);
+    }
+  } else {
+    if (workTitleTimer != null) { clearInterval(workTitleTimer); workTitleTimer = null; }
+    if (document.title.startsWith(WORK_PREFIX)) document.title = document.title.slice(WORK_PREFIX.length);
+  }
+  return { ok: true, data: { working } };
+}
+
 async function handle(op: ContentOp): Promise<ContentResult> {
   console.log('%c[dodo:content]', 'color:#6b4ea3;font-weight:600', op);
   try {
+    if (op.op === 'set_working') {
+      return setWorking(op.working);
+    }
     if (op.op === 'click') {
       const el = resolveRef(op.selector);
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };

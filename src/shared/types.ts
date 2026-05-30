@@ -21,7 +21,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   providerId: 'gemini',
   apiKey: '',
-  model: 'gemini-3-flash-preview',
+  model: 'gemini-3.5-flash',
   defaultMode: 'ask',
   approvalMode: 'always_ask',
   confirmNavigation: true,
@@ -88,6 +88,8 @@ export type ToolName =
   | 'type'
   | 'press'
   | 'extract'
+  | 'list_tabs'
+  | 'switch_tab'
   | 'generate_file'
   | 'plan_actions'
   | 'execute_actions';
@@ -173,6 +175,8 @@ export type AgentState = {
   workingLabel?: string;
   errorMsg?: string;
   startedAt?: number;
+  // The tab the agent is currently operating on — shown in the side-panel tab card.
+  activeTab?: { id: number; title: string; url: string; favIconUrl?: string };
 };
 
 export const INITIAL_AGENT_STATE: AgentState = {

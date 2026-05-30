@@ -10,6 +10,7 @@ import { PlanProposalCard } from '../cards/PlanProposalCard';
 import { ExecutionCard } from '../cards/ExecutionCard';
 import { PermissionCard } from '../cards/PermissionCard';
 import { FileArtifactCard } from '../cards/FileArtifactCard';
+import { BrowserTabCard } from '../cards/BrowserTabCard';
 import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
 
 const toolIcon = (name: ToolName) => {
@@ -172,6 +173,9 @@ export function Chat({
       </div>
 
       {showNotifyBanner && <NotifyBanner c={c} onEnable={onEnableNotify} onClose={onDismissNotify}/>}
+      {state.activeTab && (
+        <BrowserTabCard c={c} tab={state.activeTab} working={phase === 'working'}/>
+      )}
       <Composer
         c={c}
         state={composerState}

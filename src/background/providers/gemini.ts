@@ -26,7 +26,7 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 }
 
 type GeminiPart =
-  | { text: string; thoughtSignature?: string }
+  | { text: string; thought?: boolean; thoughtSignature?: string }
   | { inlineData: { mimeType: string; data: string } }
   | { functionCall: { name: string; args: Record<string, unknown> }; thoughtSignature?: string }
   | { functionResponse: { name: string; response: { result?: unknown; error?: string } } };
@@ -61,8 +61,10 @@ function toGeminiContents(messages: ChatMessage[]): GeminiContent[] {
 export const GeminiProvider: ModelProvider = {
   id: 'gemini',
   label: 'google · gemini api',
-  defaultModel: 'gemini-3-flash-preview',
+  defaultModel: 'gemini-3.5-flash',
   availableModels: [
+    { id: 'gemini-3.1-pro-preview', label: 'gemini-3.1-pro-preview (most capable)' },
+    { id: 'gemini-3.5-flash', label: 'gemini-3.5-flash (recommended)' },
     { id: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview' },
     { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (cheaper)' },
   ],
@@ -114,10 +116,11 @@ export const GeminiProvider: ModelProvider = {
       throw new Error(`gemini ${res.status}: ${errBody.slice(0, 240)}`);
     }
     const data = (await res.json()) as {
-      candidates?: { content?: { parts?: GeminiPart[] } }[];
+      candidates?: { content?: { parts?: GeminiPart[] }; finishReason?: string }[];
       usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
     };
-    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const candidate = data.candidates?.[0];
+    const parts = candidate?.content?.parts ?? [];
     const calls: { name: string; args: Record<string, unknown>; id: string; thoughtSignature?: string }[] = [];
     let textOut = '';
     for (const p of parts) {
@@ -129,8 +132,17 @@ export const GeminiProvider: ModelProvider = {
           thoughtSignature: p.thoughtSignature,
         });
       } else if ('text' in p && typeof p.text === 'string') {
+        // Gemini 3.x thinking models return reasoning as parts flagged `thought:true`. These are
+        // NOT the answer — including them leaks thinking fragments (e.g. a bare step number) as the
+        // final response. Only accumulate real answer text.
+        if (p.thought) continue;
         textOut += p.text;
       }
+    }
+    // If thinking ate the output budget we can get a turn with no answer and no call. Surface it as
+    // empty (the agent loop retries) rather than emitting a truncated thought fragment.
+    if (!calls.length && !textOut && candidate?.finishReason && candidate.finishReason !== 'STOP') {
+      console.warn('%c[dodo]', 'color:#6b4ea3;font-weight:600', `gemini finishReason=${candidate.finishReason} with no answer/call`);
     }
     const usage = data.usageMetadata
       ? { input: data.usageMetadata.promptTokenCount ?? 0, output: data.usageMetadata.candidatesTokenCount ?? 0 }
@@ -139,3 +151,4 @@ export const GeminiProvider: ModelProvider = {
     return { kind: 'text', text: textOut, usage };
   },
 };
+

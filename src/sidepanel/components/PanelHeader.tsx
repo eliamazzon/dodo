@@ -6,7 +6,7 @@ export type ModelOption = { id: string; label: string };
 
 export function PanelHeader({
   c,
-  model = 'gemini-3-flash-preview',
+  model = 'gemini-3.5-flash',
   provider = 'gemini',
   availableModels,
   onSelectModel,

@@ -129,6 +129,22 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       required: [],
     },
   },
+  {
+    name: 'list_tabs',
+    description:
+      'List the open browser tabs (id, title, url, and which one is currently active). Use this to find a tab to switch to with switch_tab. You operate on ONE tab at a time — the active one.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'switch_tab',
+    description:
+      'Make a different tab the active tab — all subsequent tools (snapshot/click/type/…) then target it. Pass a `tabId` from list_tabs. Note: when an action you take opens a NEW tab, it becomes active automatically (the tool result says so) — you do NOT need switch_tab for that. After switching, call snapshot() before acting.',
+    parameters: {
+      type: 'object',
+      properties: { tabId: { type: 'number', description: 'The id of the tab to switch to (from list_tabs).' } },
+      required: ['tabId'],
+    },
+  },
 ];
 
 // ── planner + executor — DISABLED for now, kept for later reuse ───────────────
@@ -178,6 +194,68 @@ let pinnedTabId: number | null = null;
 
 export function pinActiveTab(tabId: number | null) {
   pinnedTabId = tabId;
+}
+
+export function getPinnedTabId(): number | null {
+  return pinnedTabId;
+}
+
+// A tab opened by the agent's active tab (target="_blank"/window.open), awaiting auto-follow.
+let pendingNewTabId: number | null = null;
+let tabTrackingStarted = false;
+
+// Register tab-lifecycle listeners once. onCreated flags tabs spawned by the active tab so the
+// agent can auto-follow them; onRemoved keeps our ids from pointing at dead tabs.
+export function initTabTracking() {
+  if (tabTrackingStarted) return;
+  tabTrackingStarted = true;
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (tab.id != null && tab.openerTabId != null && tab.openerTabId === pinnedTabId) {
+      pendingNewTabId = tab.id;
+    }
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (tabId === pinnedTabId) pinnedTabId = null;
+    if (tabId === pendingNewTabId) pendingNewTabId = null;
+  });
+}
+
+export function consumePendingNewTab(): number | null {
+  const id = pendingNewTabId;
+  pendingNewTabId = null;
+  return id;
+}
+
+export async function listTabs(): Promise<{ id: number; title: string; url: string; active: boolean }[]> {
+  const tabs = await chrome.tabs.query({ windowType: 'normal' });
+  return tabs
+    .filter((t) => t.id != null)
+    .map((t) => ({ id: t.id!, title: t.title ?? '', url: t.url ?? '', active: t.id === pinnedTabId }));
+}
+
+// Best-effort: toggle the working-title indicator on a tab. No-ops on restricted/chrome:// tabs.
+export async function setTabWorking(tabId: number | null, working: boolean): Promise<void> {
+  if (tabId == null) return;
+  await runContentOp(tabId, { op: 'set_working', working }).catch(() => undefined);
+}
+
+// Resolve once a (typically just-opened) tab finishes loading, or after a timeout.
+export function waitForTabComplete(tabId: number, timeoutMs = 25000): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && info.status === 'complete') finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then((t) => { if (t.status === 'complete') finish(); }).catch(() => {});
+    setTimeout(finish, timeoutMs);
+  });
 }
 
 export async function getActiveTab(): Promise<chrome.tabs.Tab | null> {

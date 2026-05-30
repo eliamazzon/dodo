@@ -3,6 +3,10 @@ import { agent } from './agent';
 import { loadStore, saveSettings, deleteHistoryItem } from './store';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../shared/messages';
 import { notifyForce } from './notify';
+import { initTabTracking } from './tools';
+
+// Track tab lifecycle (new tabs opened by the agent's active tab, removed tabs) for multi-tab support.
+initTabTracking();
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   try {

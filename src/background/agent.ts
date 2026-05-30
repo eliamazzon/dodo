@@ -13,7 +13,7 @@ import type {
 import { INITIAL_AGENT_STATE } from '../shared/types';
 import type { ChatMessage, ContentPart } from './providers/types';
 import { getProvider } from './providers';
-import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab } from './tools';
+import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab, getPinnedTabId, consumePendingNewTab, listTabs, setTabWorking, waitForTabComplete } from './tools';
 import { getSettings, upsertHistory, getHistoryItem, addAllowedHost } from './store';
 import { isHostAllowed } from './permissions';
 import { log } from './log';
@@ -31,6 +31,7 @@ You drive the browser with these tools, one action at a time, inspecting the pag
   • type({selector, text}) — type into an input/textarea/rich-text editor (contentEditable), identified by a \`data-sel\` ref. Returns the resulting \`value\`; if the diff is empty but \`value\` shows your text, it worked — do NOT retry. type() does not submit. For an input/textarea it sets the value; for a contentEditable editor it INSERTS at the cursor (it does not erase existing text). A message/document compose BODY is usually a contentEditable editor, often inside an iframe — extract({mode:"map"}) lists it (it descends into same-origin iframes; the editor appears flagged \`contenteditable\` with its id), so map → type() into that ref. Don't hunt for it with repeated snapshots. Write the WHOLE body in a SINGLE type() call (use \\n for line breaks); composing it across several type()/toolbar-click cycles is unreliable and not worth it — toolbar formatting (bold/lists) does not apply cleanly via clicks.
   • press({key, selector?}) — dispatch a real key press (Enter, Tab, Escape, Backspace, Arrow keys). Use it ONLY when an action needs a keystroke: Enter to COMMIT a typed value that becomes a chip/selection (a recipient/email/tag in a To field, or an autocomplete/combobox/search pick), or Escape to dismiss a menu/dialog. Omit \`selector\` to press on the currently focused element (e.g. right after the type() that needs committing). Do NOT press after typing into a plain text field (subject, body, search-as-you-type, normal forms) — that text is already entered. Do NOT use Tab just to "move to the next field"; locate the target element via snapshot/extract and type() into it directly.
   • extract({selector?, mode?}) — survey or read the page. mode="map" (default) returns a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label, covering the whole page (or a scoped region) — use it to enumerate lists/grids/menus/results and get refs for all of them. mode="text" returns the full readable page text for reading prose/tables/prices.
+  • list_tabs() / switch_tab({tabId}) — list the open browser tabs and make a different one active (all later tools target the active tab). You work on ONE tab at a time. When an action you take opens a NEW tab, it becomes active AUTOMATICALLY and the tool result tells you — you don't need switch_tab for that. After switching or following a new tab, snapshot() before acting.
 
 The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
 
@@ -170,6 +171,15 @@ class Agent {
   private taskId: string | null = null;
   private firstUserText: string | null = null; // used as the history row title
 
+  constructor() {
+    // Keep the side-panel tab card in sync as the active tab's title/url/favicon change.
+    chrome.tabs.onUpdated.addListener((tabId, info) => {
+      if (tabId === getPinnedTabId() && (info.title || info.url || info.favIconUrl || info.status === 'complete')) {
+        void this.refreshActiveTab();
+      }
+    });
+  }
+
   subscribe(l: Listener): () => void {
     this.listeners.add(l);
     l(this.state);
@@ -261,6 +271,8 @@ class Agent {
       if (tab?.id != null) {
         pinActiveTab(tab.id);
         log.info('pinned tab', { tabId: tab.id, url: tab.url });
+        await setTabWorking(tab.id, true);
+        await this.refreshActiveTab();
       }
     }
 
@@ -321,6 +333,7 @@ class Agent {
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
     const wasRunning = this.taskId
       && this.state.phase !== 'idle' && this.state.phase !== 'complete' && this.state.phase !== 'error';
+    void setTabWorking(getPinnedTabId(), false);
     this.setState({
       phase: 'complete',
       workingLabel: undefined,
@@ -354,6 +367,7 @@ class Agent {
     this.firstUserText = null;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
+    void setTabWorking(getPinnedTabId(), false);
     pinActiveTab(null);
     this.state = { ...INITIAL_AGENT_STATE };
     this.emit();
@@ -419,12 +433,10 @@ class Agent {
   async denyPermission() {
     const pending = this.state.messages.find((m) => m.kind === 'permission_request' && m.status === 'pending');
     if (pending) this.updateMessage(pending.id, { status: 'denied' } as Partial<UIMessage>);
-    if (this.resolvePermission) {
-      this.resolvePermission(false);
-      this.resolvePermission = null;
-    }
-    this.setState({ pendingPermission: undefined });
-    this.fail('user denied permission');
+    // Don't treat a denial as an error — halt the run and leave the conversation alive (phase
+    // 'complete') so the user can redirect with a follow-up message. stop() resolves the pending
+    // permission promise (false), sets `aborted` so the loop exits, and persists.
+    this.stop();
   }
 
   private waitForPermission(host: string, reason: string): Promise<boolean> {
@@ -601,6 +613,24 @@ class Agent {
   }
 
   private async dispatchGranular(name: ToolName, args: Record<string, unknown>): Promise<unknown> {
+    // Browser-level tab tools — they don't act on a page, so handle them before the active-tab gate.
+    if (name === 'list_tabs') {
+      return { tabs: await listTabs() };
+    }
+    if (name === 'switch_tab') {
+      const tabId = Number(args.tabId);
+      const target = await chrome.tabs.get(tabId).catch(() => null);
+      if (!target || target.id == null) throw new Error(`no tab with id ${args.tabId}`);
+      const prev = getPinnedTabId();
+      if (prev != null && prev !== target.id) await setTabWorking(prev, false);
+      pinActiveTab(target.id);
+      await chrome.tabs.update(target.id, { active: true }).catch(() => undefined);
+      if (target.windowId != null) await chrome.windows.update(target.windowId, { focused: true }).catch(() => undefined);
+      await setTabWorking(target.id, true);
+      await this.refreshActiveTab();
+      return { ok: true, tabId: target.id, title: target.title, url: target.url, note: 'switched — snapshot() before acting' };
+    }
+
     const tab = await getActiveTab();
     if (!tab || tab.id == null) throw new Error('no active tab');
 
@@ -615,6 +645,9 @@ class Agent {
       await navigateTab(tab.id, url);
       // SPAs fire status:complete on HTML load, not after JS renders content
       await new Promise<void>((r) => setTimeout(r, 1500));
+      // The reload wiped the content script (and the working-title prefix) — re-apply it.
+      await setTabWorking(tab.id, true);
+      await this.refreshActiveTab();
       return { ok: true, url };
     }
 
@@ -643,12 +676,12 @@ class Agent {
     if (name === 'click') {
       const r = await runContentOp(tab.id, { op: 'click', selector: String(args.selector ?? '') });
       if (!r.ok) throw new Error(r.error);
-      return r.data;
+      return this.maybeFollowNewTab(r.data);
     }
     if (name === 'type') {
       const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? '') });
       if (!r.ok) throw new Error(r.error);
-      return r.data;
+      return this.maybeFollowNewTab(r.data);
     }
     if (name === 'press') {
       const r = await runContentOp(tab.id, {
@@ -658,7 +691,7 @@ class Agent {
         modifiers: Array.isArray(args.modifiers) ? args.modifiers : undefined,
       });
       if (!r.ok) throw new Error(r.error);
-      return r.data;
+      return this.maybeFollowNewTab(r.data);
     }
     if (name === 'extract') {
       const r = await runContentOp(tab.id, {
@@ -670,6 +703,37 @@ class Agent {
       return r.data;
     }
     throw new Error(`unknown granular tool: ${name}`);
+  }
+
+  // If the action just opened a new tab, make it the active tab and tell the model about it.
+  private async maybeFollowNewTab(data: unknown): Promise<unknown> {
+    const newTabId = consumePendingNewTab();
+    if (newTabId == null) return data;
+    const tab = await this.followNewTab(newTabId);
+    const note = tab
+      ? `A new tab opened and is now the active tab: ${tab.title || '(untitled)'} (${tab.url || ''}). Subsequent tools target it; snapshot() before acting.`
+      : 'A new tab opened and is now the active tab. snapshot() before acting.';
+    return (data && typeof data === 'object') ? { ...(data as object), note } : { result: data, note };
+  }
+
+  private async followNewTab(tabId: number): Promise<chrome.tabs.Tab | null> {
+    await waitForTabComplete(tabId);
+    const prev = getPinnedTabId();
+    if (prev != null && prev !== tabId) await setTabWorking(prev, false);
+    pinActiveTab(tabId);
+    await setTabWorking(tabId, true);
+    await this.refreshActiveTab();
+    return chrome.tabs.get(tabId).catch(() => null);
+  }
+
+  // Mirror the active tab's title/url/favicon into AgentState for the side-panel tab card.
+  private async refreshActiveTab(): Promise<void> {
+    const id = getPinnedTabId();
+    if (id == null) { this.setState({ activeTab: undefined }); return; }
+    const t = await chrome.tabs.get(id).catch(() => null);
+    if (t?.id != null) {
+      this.setState({ activeTab: { id: t.id, title: t.title ?? '', url: t.url ?? '', favIconUrl: t.favIconUrl } });
+    }
   }
 
   private async handlePlanActions(args: Record<string, unknown>): Promise<{ result: unknown; isError: boolean }> {
@@ -973,6 +1037,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
 
   private complete() {
     log.info('complete');
+    void setTabWorking(getPinnedTabId(), false);
     this.setState({ phase: 'complete', workingLabel: undefined });
     notify('dodo · done', 'task complete');
     void this.persistSnapshot('done');
@@ -980,6 +1045,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
 
   private fail(msg: string) {
     log.err('fail', msg);
+    void setTabWorking(getPinnedTabId(), false);
     this.setState({ phase: 'error', errorMsg: msg, workingLabel: undefined });
     this.pushMessage({ id: newId('err'), kind: 'error', text: msg, t: Date.now() });
     notify('dodo · halted', truncate(msg, 140));
@@ -1026,6 +1092,8 @@ function labelFor(name: ToolName, args: Record<string, unknown>): string {
     const verb = args.mode === 'text' ? 'read' : 'map';
     return args.selector ? `${verb} ${args.selector}` : `${verb} page`;
   }
+  if (name === 'list_tabs') return 'list tabs';
+  if (name === 'switch_tab') return `switch to tab ${args.tabId ?? ''}`;
   if (name === 'plan_actions') return 'plan actions';
   if (name === 'execute_actions') return 'execute actions';
   return name;
