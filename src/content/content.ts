@@ -534,7 +534,8 @@ function extractMap(root: Element): string {
 }
 
 // Named keys the press() tool can dispatch, with the standard key/code/keyCode each carries. Covers
-// the common commit/submit/dismiss/navigate keys; arbitrary character typing goes through type().
+// the common commit/submit/dismiss/navigate keys and letters used in modifier combos (Cmd+A/C/V/etc.).
+// Arbitrary character typing goes through type().
 const KEY_META: Record<string, { key: string; code: string; keyCode: number }> = {
   Enter:      { key: 'Enter',      code: 'Enter',       keyCode: 13 },
   Tab:        { key: 'Tab',        code: 'Tab',         keyCode: 9 },
@@ -544,6 +545,14 @@ const KEY_META: Record<string, { key: string; code: string; keyCode: number }> =
   ArrowDown:  { key: 'ArrowDown',  code: 'ArrowDown',   keyCode: 40 },
   ArrowLeft:  { key: 'ArrowLeft',  code: 'ArrowLeft',   keyCode: 37 },
   ArrowRight: { key: 'ArrowRight', code: 'ArrowRight',  keyCode: 39 },
+  // Letters — only meaningful when paired with a modifier (e.g. Meta+a = select-all)
+  a: { key: 'a', code: 'KeyA', keyCode: 65 },
+  c: { key: 'c', code: 'KeyC', keyCode: 67 },
+  f: { key: 'f', code: 'KeyF', keyCode: 70 },
+  s: { key: 's', code: 'KeyS', keyCode: 83 },
+  v: { key: 'v', code: 'KeyV', keyCode: 86 },
+  x: { key: 'x', code: 'KeyX', keyCode: 88 },
+  z: { key: 'z', code: 'KeyZ', keyCode: 90 },
 };
 
 async function handle(op: ContentOp): Promise<ContentResult> {
@@ -627,11 +636,41 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (op.selector) target.focus();
       const meta = KEY_META[op.key];
       if (!meta) return { ok: false, error: `unsupported key "${op.key}" — use one of: ${Object.keys(KEY_META).join(', ')}` };
+      const mods = op.modifiers ?? [];
+      const modInit = {
+        metaKey:  mods.includes('Meta'),
+        ctrlKey:  mods.includes('Control'),
+        altKey:   mods.includes('Alt'),
+        shiftKey: mods.includes('Shift'),
+      };
       const focused = (target.ownerDocument.activeElement as HTMLElement | null) ?? target;
+      const doc = focused.ownerDocument;
+
+      // Synthetic keyboard events don't trigger native browser behaviors (select-all, copy, etc.).
+      // For primary-modifier combos (Meta/Ctrl), invoke the real browser API first, then dispatch
+      // the keyboard event so app-level listeners also fire.
+      if (mods.includes('Meta') || mods.includes('Control')) {
+        if (op.key === 'a') {
+          if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+            focused.select();
+          } else {
+            doc.execCommand('selectAll');
+          }
+        } else if (op.key === 'c') {
+          doc.execCommand('copy');
+        } else if (op.key === 'x') {
+          doc.execCommand('cut');
+        } else if (op.key === 'z') {
+          doc.execCommand(mods.includes('Shift') ? 'redo' : 'undo');
+        } else if (op.key === 'v') {
+          doc.execCommand('paste');
+        }
+      }
+
       for (const type of ['keydown', 'keyup'] as const) {
         focused.dispatchEvent(new KeyboardEvent(type, {
           key: meta.key, code: meta.code, keyCode: meta.keyCode, which: meta.keyCode,
-          bubbles: true, cancelable: true,
+          bubbles: true, cancelable: true, ...modInit,
         }));
       }
       await new Promise<void>((r) => setTimeout(r, 350));

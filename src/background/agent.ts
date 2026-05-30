@@ -655,6 +655,7 @@ class Agent {
         op: 'press',
         key: String(args.key ?? ''),
         selector: args.selector ? String(args.selector) : undefined,
+        modifiers: Array.isArray(args.modifiers) ? args.modifiers : undefined,
       });
       if (!r.ok) throw new Error(r.error);
       return r.data;
@@ -1015,7 +1016,12 @@ function labelFor(name: ToolName, args: Record<string, unknown>): string {
   if (name === 'snapshot') return args.element ? `expand ${args.element}` : 'read page DOM';
   if (name === 'click') return `click ${args.selector ?? ''}`;
   if (name === 'type') return `type into ${args.selector ?? ''}`;
-  if (name === 'press') return `press ${args.key ?? ''}`;
+  if (name === 'press') {
+    const mods = Array.isArray(args.modifiers) && args.modifiers.length > 0
+      ? args.modifiers.map((m: string) => m === 'Meta' ? 'Cmd' : m).join('+') + '+'
+      : '';
+    return `press ${mods}${args.key ?? ''}`;
+  }
   if (name === 'extract') {
     const verb = args.mode === 'text' ? 'read' : 'map';
     return args.selector ? `${verb} ${args.selector}` : `${verb} page`;

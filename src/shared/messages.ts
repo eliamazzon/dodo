@@ -21,7 +21,7 @@ export type BgToPanel =
 export type ContentOp =
   | { op: 'click'; selector: string }
   | { op: 'type'; selector: string; text: string }
-  | { op: 'press'; selector?: string; key: string } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
+  | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[] } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
   | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
   | { op: 'snapshot_structured' }; // structured elements[] — kept for the disabled planner path

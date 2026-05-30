@@ -92,11 +92,12 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   },
   {
     name: 'press',
-    description: 'Dispatch a real key press. Use it ONLY when a keystroke is needed: Enter to COMMIT a typed value into a chip/selection (recipient/email/tag in a To field) or to confirm an autocomplete/combobox pick, or Escape to dismiss a menu/dialog. Do NOT press after typing into a plain text field (subject, body, normal form input) — that text is already entered. Do NOT use Tab just to move between fields; find the next element with snapshot/extract and type() into it. Without a selector it presses on the currently focused element (e.g. right after a type()); pass a selector to focus an element first.',
+    description: 'Dispatch a real key press, optionally with modifier keys. Use it ONLY when a keystroke is needed: Enter to COMMIT a typed value into a chip/selection (recipient/email/tag in a To field) or to confirm an autocomplete/combobox pick, or Escape to dismiss a menu/dialog. For modifier combos pass `modifiers` — e.g. press({key:"a",modifiers:["Meta"]}) to select all, press({key:"c",modifiers:["Meta"]}) to copy, press({key:"v",modifiers:["Meta"]}) to paste, press({key:"z",modifiers:["Meta"]}) to undo. Do NOT press after typing into a plain text field (subject, body, normal form input) — that text is already entered. Do NOT use Tab just to move between fields; find the next element with snapshot/extract and type() into it. Without a selector it presses on the currently focused element (e.g. right after a type()); pass a selector to focus an element first.',
     parameters: {
       type: 'object',
       properties: {
-        key: { type: 'string', enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'], description: 'Key to press.' },
+        key: { type: 'string', enum: ['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'a', 'c', 'f', 's', 'v', 'x', 'z'], description: 'Key to press. Letter keys (a/c/v/x/z/s/f) are intended for use with modifiers.' },
+        modifiers: { type: 'array', items: { type: 'string', enum: ['Meta', 'Control', 'Alt', 'Shift'] }, description: 'Modifier keys to hold. Use "Meta" for Cmd on Mac / Win key on Windows.' },
         selector: { type: 'string', description: 'Optional `data-sel` ref to focus before pressing. Omit to press on the currently focused element.' },
       },
       required: ['key'],
