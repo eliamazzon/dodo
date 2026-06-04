@@ -163,6 +163,7 @@ function newId(prefix: string): string {
 
 class Agent {
   state: AgentState = { ...INITIAL_AGENT_STATE };
+  readonly ready: Promise<void>;
   private listeners = new Set<Listener>();
   private aborted = false;
   private resolvePermission: ((allowed: boolean) => void) | null = null;
@@ -172,12 +173,33 @@ class Agent {
   private firstUserText: string | null = null; // used as the history row title
 
   constructor() {
+    this.ready = this.loadSavedState();
     // Keep the side-panel tab card in sync as the active tab's title/url/favicon change.
     chrome.tabs.onUpdated.addListener((tabId, info) => {
       if (tabId === getPinnedTabId() && (info.title || info.url || info.favIconUrl || info.status === 'complete')) {
         void this.refreshActiveTab();
       }
     });
+  }
+
+  private async loadSavedState(): Promise<void> {
+    try {
+      const raw = await chrome.storage.local.get(['activeState']);
+      if (!raw.activeState) return;
+      const saved = raw.activeState as AgentState;
+      if (saved.phase === 'working' || saved.phase === 'awaiting_approval' || saved.phase === 'awaiting_permission') {
+        this.state = {
+          ...saved,
+          phase: 'error',
+          errorMsg: 'Session interrupted — the extension was reloaded. You can retry or start a new task.',
+          workingLabel: undefined,
+          pendingExecution: undefined,
+          pendingPermission: undefined,
+        };
+      } else {
+        this.state = saved;
+      }
+    } catch {}
   }
 
   subscribe(l: Listener): () => void {
@@ -187,6 +209,13 @@ class Agent {
   }
 
   private emit() {
+    const stripped = {
+      ...this.state,
+      messages: this.state.messages.map((m) =>
+        m.kind === 'tool_activity' ? { ...m, result: undefined, thumb: undefined } : m,
+      ),
+    };
+    void chrome.storage.local.set({ activeState: stripped });
     for (const l of this.listeners) l(this.state);
   }
 
@@ -370,6 +399,7 @@ class Agent {
     void setTabWorking(getPinnedTabId(), false);
     pinActiveTab(null);
     this.state = { ...INITIAL_AGENT_STATE };
+    void chrome.storage.local.remove('activeState');
     this.emit();
   }
 

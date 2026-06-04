@@ -32,6 +32,7 @@ chrome.runtime.onConnect.addListener((port) => {
   let unsub: (() => void) | null = null;
 
   const send = async () => {
+    await agent.ready;
     const { settings, allowlist, history } = await loadStore();
     const msg: BgToPanel = { kind: 'state', state: agent.state, settings, allowlist, history };
     try { port.postMessage(msg); } catch {}
