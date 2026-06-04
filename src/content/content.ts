@@ -556,6 +556,69 @@ const KEY_META: Record<string, { key: string; code: string; keyCode: number }> =
   z: { key: 'z', code: 'KeyZ', keyCode: 90 },
 };
 
+// Type into an input/textarea one character at a time, dispatching the full key + input event
+// sequence a real typist produces. Autocomplete/combobox widgets fire their per-keystroke search
+// off these events (or off incremental value growth), so a single-shot value set never opens their
+// dropdown. Clears the field first so each search query is the growing prefix; delayMs paces the
+// keystrokes so the widget's debounced search can keep up.
+async function typePerChar(el: HTMLInputElement | HTMLTextAreaElement, text: string, delayMs = 50): Promise<void> {
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setValue = (v: string) => Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, v);
+  el.focus();
+  setValue('');
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  for (const ch of text) {
+    const code = ch === ' ' ? 'Space' : /[a-z]/i.test(ch) ? `Key${ch.toUpperCase()}` : /[0-9]/.test(ch) ? `Digit${ch}` : '';
+    const keyCode = ch.toUpperCase().charCodeAt(0);
+    const keyInit = { key: ch, code, keyCode, which: keyCode, bubbles: true, cancelable: true };
+    el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+    el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: ch, bubbles: true, cancelable: true }));
+    setValue(el.value + ch);
+    el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ch, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+    await new Promise<void>((r) => setTimeout(r, delayMs));
+  }
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+// Resolve once DOM mutations have been quiet for quietMs (the async dropdown has rendered and
+// settled), or after timeoutMs as a hard cap. Lets per-char typing capture the dropdown as soon as
+// it appears, instead of waiting a fixed beat.
+function waitForDomQuiet(timeoutMs = 1000, quietMs = 200): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    let quietTimer: ReturnType<typeof setTimeout>;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(quietTimer);
+      clearTimeout(hardCap);
+      obs.disconnect();
+      resolve();
+    };
+    const obs = new MutationObserver(() => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(finish, quietMs);
+    });
+    obs.observe(document.body, { subtree: true, childList: true, attributes: true });
+    quietTimer = setTimeout(finish, quietMs);
+    const hardCap = setTimeout(finish, timeoutMs);
+  });
+}
+
+// Conservative test for an autocomplete/combobox-style field whose dropdown opens on per-keystroke
+// input. Used to decide whether to auto-retry a no-op fast type character-by-character.
+function isComboboxLike(el: Element): boolean {
+  const role = el.getAttribute('role');
+  return role === 'combobox' || role === 'searchbox'
+    || el.hasAttribute('aria-autocomplete')
+    || el.hasAttribute('aria-expanded')
+    || el.hasAttribute('aria-controls')
+    || el.hasAttribute('aria-owns')
+    || el.hasAttribute('list')
+    || (el instanceof HTMLInputElement && el.type === 'search');
+}
+
 // Working indicator: prefix document.title so the agent's active tab is recognisable in the tab
 // strip. Re-applied on an interval because SPAs rewrite document.title as they navigate/update.
 const WORK_PREFIX = '🟢 ';
@@ -836,7 +899,14 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       el.focus();
       await showCursor('type', el, op.text ? `"${op.text.slice(0, 38)}"` : 'type');
       const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
-      if (isField) {
+      // Whether we typed character-by-character (explicit perChar, or the combobox auto-fallback below).
+      let usedPerChar = false;
+      if (op.perChar && isField) {
+        // Per-char path: real key events so the field's per-keystroke autocomplete search fires.
+        await typePerChar(el as HTMLInputElement | HTMLTextAreaElement, op.text);
+        usedPerChar = true;
+        await waitForDomQuiet();
+      } else if (isField) {
         // Native value setter so React/controlled inputs pick up the change.
         const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, op.text);
@@ -867,23 +937,42 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       } else {
         return { ok: false, error: `element ${op.selector} is not typeable (not an input, textarea, or contentEditable)` };
       }
-      await new Promise<void>((r) => setTimeout(r, 350));
-      const after = interactiveElements(true);
+      // Per-char already waited for the DOM to quiet; the fast/contentEditable paths need a beat.
+      if (!usedPerChar) await new Promise<void>((r) => setTimeout(r, 350));
+      let after = interactiveElements(true);
+      let diff = formatDiff(before, after);
       // Read the value AFTER the settle so async/controlled resets are reflected: typing usually
       // produces no element add/remove (the diff stays empty), so `value` is the signal that the
       // text landed and the model needn't retry.
-      const value = isField ? (el as HTMLInputElement | HTMLTextAreaElement).value : (el.textContent ?? '');
+      let value = isField ? (el as HTMLInputElement | HTMLTextAreaElement).value : (el.textContent ?? '');
+      // Auto-fallback: a fast type into a combobox-like field that filled the value but changed
+      // nothing on the page probably never triggered the dropdown's per-keystroke search. Retry
+      // once character-by-character so the suggestions open.
+      if (!usedPerChar && isField && op.text.trim().length > 0 && value.length > 0
+          && diff === '(no visible DOM changes)' && isComboboxLike(el)) {
+        await typePerChar(el as HTMLInputElement | HTMLTextAreaElement, op.text);
+        usedPerChar = true;
+        await waitForDomQuiet();
+        after = interactiveElements(true);
+        diff = formatDiff(before, after);
+        value = (el as HTMLInputElement | HTMLTextAreaElement).value;
+      }
       // A non-empty type that left the field empty means it rejected the programmatic write — almost
       // always a controlled search/combobox that must be opened/activated first. Tell the model so it
       // tries a different move instead of re-typing identically (the observed failure loop).
       const rejected = op.text.trim().length > 0 && value.length === 0;
+      // After per-char typing, appeared elements in the diff are the autocomplete suggestions — the
+      // model must pick one, since these widgets reject a value that wasn't selected.
+      const optionsAppeared = usedPerChar && diff !== '(no visible DOM changes)';
       return {
         ok: true,
         data: {
           typed: op.text.length,
           value: value.slice(0, 200),
-          diff: formatDiff(before, after),
-          ...(rejected ? { note: "the field is empty after typing — it rejected the text. This is usually an inert/collapsed search or combobox: clicking or re-typing into THIS input does nothing. Instead click the adjacent TRIGGER — a nearby \"Search\" button/icon or the surrounding control, NOT this input — to open the real search panel, then type into the NEW input that appears there. Do not re-type into this same field." } : {}),
+          diff,
+          ...(rejected ? { note: "the field is empty after typing — it rejected the text. This is usually an inert/collapsed search or combobox: clicking or re-typing into THIS input does nothing. Instead click the adjacent TRIGGER — a nearby \"Search\" button/icon or the surrounding control, NOT this input — to open the real search panel, then type into the NEW input that appears there. Do not re-type into this same field." }
+            : optionsAppeared ? { note: "a dropdown of suggestions appeared (the `+` lines in the diff). This is an autocomplete that will NOT accept an unpicked value — SELECT one now: click the matching option's data-sel ref, or press({key:\"ArrowDown\"}) then press({key:\"Enter\"})." }
+            : {}),
         },
       };
     }

@@ -709,7 +709,7 @@ class Agent {
       return this.maybeFollowNewTab(r.data);
     }
     if (name === 'type') {
-      const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? '') });
+      const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? ''), perChar: Boolean(args.perChar) });
       if (!r.ok) throw new Error(r.error);
       return this.maybeFollowNewTab(r.data);
     }

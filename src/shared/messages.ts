@@ -20,7 +20,7 @@ export type BgToPanel =
 
 export type ContentOp =
   | { op: 'click'; selector: string }
-  | { op: 'type'; selector: string; text: string }
+  | { op: 'type'; selector: string; text: string; perChar?: boolean } // perChar: type one char at a time with real key events (for autocomplete/combobox dropdowns)
   | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[] } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
   | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
