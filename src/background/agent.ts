@@ -1049,8 +1049,9 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
   private async fail(msg: string) {
     log.err('fail', msg);
     await setTabWorking(getPinnedTabId(), false); // await — see complete()
+    // Render the error solely through the phase:'error' ErrorBanner ("halted" + retry) in Chat.tsx.
+    // Don't also pushMessage a kind:'error' entry — that produced a duplicate red box above the banner.
     this.setState({ phase: 'error', errorMsg: msg, workingLabel: undefined });
-    this.pushMessage({ id: newId('err'), kind: 'error', text: msg, t: Date.now() });
     notify('dodo · halted', truncate(msg, 140));
     if (this.taskId) void this.persistSnapshot('error');
   }
