@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .ignore/
 console-*.log
+export_*
+todo
+*.zip
