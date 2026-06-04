@@ -9,6 +9,8 @@ export type AgentSnapshot = {
   history: HistoryItem[];
 };
 
+const DEFAULT_ALLOWLIST = ['*.google.com', '*.github.com', '*.notion.so', '*.wikipedia.org'];
+
 export function useAgent() {
   const [snap, setSnap] = useState<AgentSnapshot>({
     state: INITIAL_AGENT_STATE,
@@ -16,8 +18,22 @@ export function useAgent() {
     allowlist: [],
     history: [],
   });
+  const [hydrated, setHydrated] = useState(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const unmountedRef = useRef(false);
+
+  // Pre-populate from storage before the port connects to avoid flashing the empty screen.
+  useEffect(() => {
+    void chrome.storage.local.get(['activeState', 'settings', 'allowlist', 'history']).then((raw) => {
+      setSnap({
+        state: (raw.activeState as AgentState | undefined) ?? INITIAL_AGENT_STATE,
+        settings: { ...DEFAULT_SETTINGS, ...((raw.settings as Partial<Settings> | undefined) ?? {}) },
+        allowlist: (raw.allowlist as string[] | undefined) ?? DEFAULT_ALLOWLIST,
+        history: (raw.history as HistoryItem[] | undefined) ?? [],
+      });
+      setHydrated(true);
+    });
+  }, []);
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -81,6 +97,7 @@ export function useAgent() {
 
   return {
     snap,
+    hydrated,
     sendMessage: (text: string) => send({ kind: 'send_message', text }),
     approveExecution: (messageId: string) => send({ kind: 'approve_execution', messageId }),
     rejectExecution: (messageId: string) => send({ kind: 'reject_execution', messageId }),

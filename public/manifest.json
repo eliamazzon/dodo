@@ -10,7 +10,7 @@
   "host_permissions": ["<all_urls>"],
   "commands": {
     "_execute_action": {
-      "suggested_key": { "default": "Ctrl+Shift+D", "mac": "Command+Shift+D" },
+      "suggested_key": { "default": "Alt+L", "mac": "Alt+L" },
       "description": "Open DODO side panel"
     }
   }

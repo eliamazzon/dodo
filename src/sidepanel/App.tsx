@@ -30,6 +30,8 @@ export function App() {
     );
   }
 
+  if (!a.hydrated) return <div style={{ width: '100%', height: '100%', background: c.bg }} />;
+
   const provider = getProvider(snap.settings.providerId);
   const common = {
     model: snap.settings.model,

@@ -1,22 +1,21 @@
 import type { CSSProperties, ReactNode } from 'react';
-import { DODO_FONT, PANEL_W, type Palette } from '../../shared/tokens';
+import { DODO_FONT, type Palette } from '../../shared/tokens';
 
 type Props = {
   c: Palette;
   dark?: boolean;
   w?: number | string;
   h?: number | string;
-  minW?: number;
   children: ReactNode;
   style?: CSSProperties;
 };
 
 export function PanelShell({
-  c, dark, w = '100%', h = '100%', minW = PANEL_W, children, style,
+  c, dark, w = '100%', h = '100%', children, style,
 }: Props) {
   return (
     <div style={{
-      width: w, height: h, minWidth: minW,
+      width: w, height: h, boxSizing: 'border-box',
       background: c.bg, color: c.ink,
       fontFamily: DODO_FONT, fontSize: 13, lineHeight: 1.5,
       display: 'flex', flexDirection: 'column',
