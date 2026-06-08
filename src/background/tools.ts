@@ -120,7 +120,7 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     name: 'extract',
     description:
-      'Survey or read the active page. mode="map" (default) returns a COMPACT list of every interactive element with its `data-sel` ref and label — one line each — covering the whole page (or a scoped region). Use it to enumerate lists/grids/menus/search-results and to find things to click/type, especially when a snapshot would be truncated. mode="text" returns the FULL readable page text (no truncation) for reading prose, tables, or prices. Refs from the map are clickable.',
+      'FALLBACK survey/read for what snapshot can\'t show. Use it only when a snapshot — even after snapshot({element}) expands the relevant container — is truncated/depth-limited, or the page renders an empty/uninformative DOM snapshot (some SPAs). mode="map" (default) flattens the whole page (or a scoped region) to a COMPACT list of every interactive element with its `data-sel` ref and label — one line each — to enumerate a list/grid/menu/search-results that snapshot couldn\'t fully show. mode="text" returns the FULL readable page text (no truncation) for reading prose, tables, or prices. Refs from the map are clickable. Prefer snapshot() and snapshot({element}) drill-in first.',
     parameters: {
       type: 'object',
       properties: {

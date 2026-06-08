@@ -24,19 +24,19 @@ type Listener = (s: AgentState) => void;
 const EXEC_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser. You are in a chat conversation with the user — every turn you receive what they said and what tools have returned, and you respond with either tool calls or a final text answer.
 
 You drive the browser with these tools, one action at a time, inspecting the page between actions. This works for everything: tasks with a UI menu/dropdown/modal/dialog, tasks where the user is already on the right page, and tasks where the next click depends on what just appeared (mail labeling, in-app workflows, login, filters, settings):
-  • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token (e.g. data-sel="e42"); pass that ref as the selector to click/type. snapshot() gives a full-page overview (3 levels deep); snapshot({element: "e42"}) fully expands one container (dropdown, dialog, table row) — \`element\` is a ref from the latest snapshot; snapshot({element, n}) expands it n levels. Start with snapshot() for an overview, then drill in.
+  • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token (e.g. data-sel="e42"); pass that ref as the selector to click/type. snapshot() gives a full-page overview (3 levels deep). To read a specific container IN FULL — a dropdown, dialog, table, list, menu — snapshot({element: "e42"}) fully expands just that one (\`element\` is a ref from the latest snapshot), and snapshot({element, n}) expands it n levels. This drill-in is your PRIMARY way to read deep or long content: start with snapshot() for the overview, then snapshot({element}) the part you care about.
   • screenshot() — capture the viewport as a JPEG (layout context, no refs).
   • navigate({url}) — go to a URL. Triggers a host-allowlist prompt if needed.
   • click({selector}) — click an element. Selector must be a \`data-sel\` ref from snapshot(). Returns a diff of what changed in the DOM (appeared/disappeared/aria changes), with fresh refs for anything that appeared.
   • type({selector, text}) — type into an input/textarea/rich-text editor (contentEditable), identified by a \`data-sel\` ref. Returns the resulting \`value\`; if the diff is empty but \`value\` shows your text, it worked — do NOT retry. type() does not submit. For an input/textarea it sets the value; for a contentEditable editor it INSERTS at the cursor (it does not erase existing text). A message/document compose BODY is usually a contentEditable editor, often inside an iframe — extract({mode:"map"}) lists it (it descends into same-origin iframes; the editor appears flagged \`contenteditable\` with its id), so map → type() into that ref. Don't hunt for it with repeated snapshots. Write the WHOLE body in a SINGLE type() call (use \\n for line breaks); composing it across several type()/toolbar-click cycles is unreliable and not worth it — toolbar formatting (bold/lists) does not apply cleanly via clicks.
   • press({key, selector?}) — dispatch a real key press (Enter, Tab, Escape, Backspace, Arrow keys). Use it ONLY when an action needs a keystroke: Enter to COMMIT a typed value that becomes a chip/selection (a recipient/email/tag in a To field, or an autocomplete/combobox/search pick), or Escape to dismiss a menu/dialog. Omit \`selector\` to press on the currently focused element (e.g. right after the type() that needs committing). Do NOT press after typing into a plain text field (subject, body, search-as-you-type, normal forms) — that text is already entered. Do NOT use Tab just to "move to the next field"; locate the target element via snapshot/extract and type() into it directly.
-  • extract({selector?, mode?}) — survey or read the page. mode="map" (default) returns a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label, covering the whole page (or a scoped region) — use it to enumerate lists/grids/menus/results and get refs for all of them. mode="text" returns the full readable page text for reading prose/tables/prices.
+  • extract({selector?, mode?}) — the FALLBACK for what snapshot can't show. Use it only when a snapshot — even after snapshot({element}) on the relevant container — comes back truncated / depth-limited, or the page's DOM snapshot is empty/uninformative (some SPAs render nothing useful into the static DOM). mode="map" (default) flattens the whole page (or a scoped region) to a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label — use it to enumerate a list/grid/menu/results that snapshot couldn't fully show. mode="text" returns the full readable page text for reading prose/tables/prices. Also use extract({mode:"map"}) to locate a contentEditable compose editor (often inside an iframe; it appears flagged \`contenteditable\` with its id). Prefer snapshot drill-in first.
   • list_tabs() / switch_tab({tabId}) — list the open browser tabs and make a different one active (all later tools target the active tab). You work on ONE tab at a time. When an action you take opens a NEW tab, it becomes active AUTOMATICALLY and the tool result tells you — you don't need switch_tab for that. After switching or following a new tab, snapshot() before acting.
 
 The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
 
 RULES:
-- For long lists, tables, grids, or menus (inboxes, search results, settings, file lists), call extract() to enumerate EVERY item with its ref in one compact view. Do NOT drill into rows one-by-one, and do NOT assume a snapshot showed the whole list — a snapshot is depth-limited and may be truncated. A snapshot containing "… children omitted …" or "depth limit" is a PARTIAL view: switch to extract() to see everything. snapshot() is for structure/layout; extract() is for breadth.
+- To read a long list, table, grid, or menu (inboxes, search results, settings, file lists), FIRST snapshot({element}) the list/table CONTAINER to expand it in full — do NOT drill into rows one-by-one. A top-level snapshot() is depth-limited and may not show the whole list. Only if that expanded snapshot is still truncated or shows "… children omitted …" / "depth limit" do you switch to extract() for the full flat enumeration of every item + ref. snapshot (overview + drill-in) is your default; extract() is the fallback when snapshot can't show everything.
 - Do NOT invent refs or selectors. Use a \`data-sel\` ref from the LATEST snapshot (refs from a stale snapshot may no longer resolve). If you don't have one, call snapshot() first. The \`element\` arg of snapshot() is also a ref/selector from the latest snapshot — never make one up.
 - Don't call done() — there is no done tool. End your turn with a plain text message and that text IS your answer to the user.
 - Format your answer to fit the task. If the user asks for a list, output a list. If they ask a yes/no, answer briefly. If they ask for a table, use markdown. Never compress a list into a count or summary unless explicitly asked.
@@ -169,6 +169,9 @@ class Agent {
   private resolvePermission: ((allowed: boolean) => void) | null = null;
   private resolveExecution: ((approved: boolean) => void) | null = null;
   private conversation: ChatMessage[] = [];
+  // Per-turn record of the exact (post-prune) payload sent to the provider, for dodoExport.
+  // The live conversation is the cumulative store; this captures what each request actually carried.
+  private requestLog: { turn: number; at: string; model: string; chars: number; messages: ChatMessage[] }[] = [];
   private taskId: string | null = null;
   private firstUserText: string | null = null; // used as the history row title
 
@@ -184,9 +187,16 @@ class Agent {
 
   private async loadSavedState(): Promise<void> {
     try {
-      const raw = await chrome.storage.local.get(['activeState']);
+      const raw = await chrome.storage.local.get(['activeState', 'activeTaskId', 'activeFirstUserText']);
       if (!raw.activeState) return;
       const saved = raw.activeState as AgentState;
+      // Re-link to the history row so persistSnapshot keeps writing and the user can continue the task.
+      this.taskId = (raw.activeTaskId as string | undefined) ?? null;
+      this.firstUserText = (raw.activeFirstUserText as string | undefined) ?? null;
+      if (this.taskId) {
+        const item = await getHistoryItem(this.taskId);
+        if (item?.conversation) this.conversation = deserializeConversation(item.conversation);
+      }
       if (saved.phase === 'working' || saved.phase === 'awaiting_approval' || saved.phase === 'awaiting_permission') {
         this.state = {
           ...saved,
@@ -209,14 +219,28 @@ class Agent {
   }
 
   private emit() {
+    void this.persistActiveState();
+    for (const l of this.listeners) l(this.state);
+  }
+
+  // Mirror the live state to storage so a service-worker reload can restore the current view.
+  // Returns the write promise: terminal handlers (complete/fail/stop) await it so the final state
+  // is durable before the worker suspends — a bare fire-and-forget write there can be dropped,
+  // leaving storage stuck on a stale mid-loop snapshot.
+  private persistActiveState(): Promise<void> {
     const stripped = {
       ...this.state,
       messages: this.state.messages.map((m) =>
         m.kind === 'tool_activity' ? { ...m, result: undefined, thumb: undefined } : m,
       ),
     };
-    void chrome.storage.local.set({ activeState: stripped });
-    for (const l of this.listeners) l(this.state);
+    // The backing ids ride along so the restored session can re-link to its history row
+    // (the full conversation is rehydrated from there).
+    return chrome.storage.local.set({
+      activeState: stripped,
+      activeTaskId: this.taskId,
+      activeFirstUserText: this.firstUserText,
+    });
   }
 
   private setState(patch: Partial<AgentState>) {
@@ -369,7 +393,8 @@ class Agent {
       pendingPermission: undefined,
       pendingExecution: undefined,
     });
-    if (wasRunning) void this.persistSnapshot('stopped');
+    await this.persistActiveState();
+    if (wasRunning) await this.persistSnapshot('stopped');
   }
 
   async retry() {
@@ -392,6 +417,7 @@ class Agent {
   reset() {
     this.aborted = true;
     this.conversation = [];
+    this.requestLog = [];
     this.taskId = null;
     this.firstUserText = null;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
@@ -399,7 +425,7 @@ class Agent {
     void setTabWorking(getPinnedTabId(), false);
     pinActiveTab(null);
     this.state = { ...INITIAL_AGENT_STATE };
-    void chrome.storage.local.remove('activeState');
+    void chrome.storage.local.remove(['activeState', 'activeTaskId', 'activeFirstUserText']);
     this.emit();
   }
 
@@ -488,19 +514,23 @@ class Agent {
     if (!settings.apiKey) return this.fail('no api key configured — open settings to add your api key');
 
     let emptyTurns = 0;
-    let totalTokens = 0;
+    let tokensIn = 0;
+    let tokensOut = 0;
     let llmTurns = 0;
     const loopStartedAt = Date.now();
     for (let turn = 0; turn < 200 && !this.aborted; turn++) {
-      log.info(`turn ${turn} → chat`, { messages: this.conversation.length });
       this.setState({ workingLabel: 'thinking' });
+      const sentMessages = pruneStaleToolResults(this.conversation);
+      const chars = logChatRequest(turn, settings.model, sentMessages);
+      this.requestLog.push({ turn, at: new Date().toISOString(), model: settings.model, chars, messages: sentMessages });
+      if (this.requestLog.length > 100) this.requestLog.shift();
       let res;
       try {
         res = await provider.chat({
           apiKey: settings.apiKey,
           model: settings.model,
           systemPrompt: EXEC_SYSTEM,
-          messages: this.conversation,
+          messages: sentMessages,
           tools: TOOL_SCHEMAS,
         });
       } catch (e) {
@@ -510,7 +540,7 @@ class Agent {
 
       if (this.aborted) return;
       llmTurns++;
-      if (res.usage) totalTokens += res.usage.input + res.usage.output;
+      if (res.usage) { tokensIn += res.usage.input; tokensOut += res.usage.output; }
 
       if (res.kind === 'text') {
         const text = res.text.trim();
@@ -526,7 +556,8 @@ class Agent {
         this.conversation.push({ role: 'assistant', parts: [{ type: 'text', text: res.text }] });
         this.pushMessage({
           id: newId('msg'), kind: 'assistant', text,
-          tokens: totalTokens || undefined,
+          tokensIn: tokensIn || undefined,
+          tokensOut: tokensOut || undefined,
           turns: llmTurns,
           elapsed: Date.now() - loopStartedAt,
           t: Date.now(),
@@ -1046,14 +1077,24 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
   // the live in-memory ChatMessage[], not the prettified UI messages. Used by the service-worker
   // console hook (globalThis.dodoExport) to inspect/export a session as JSON.
   exportForLLM(includeImages = true) {
-    const messages = includeImages
-      ? this.conversation
-      : this.conversation.map((m) => ({
-          ...m,
-          parts: m.parts.map((p) =>
-            p.type === 'image' ? { type: 'image_omitted', mimeType: p.mimeType } : p,
-          ),
-        }));
+    const stripImages = (msgs: ChatMessage[]) =>
+      msgs.map((m) => ({
+        ...m,
+        parts: m.parts.map((p) =>
+          p.type === 'image' ? { type: 'image_omitted', mimeType: p.mimeType } : p,
+        ),
+      }));
+    const messages = includeImages ? this.conversation : stripImages(this.conversation);
+    // `messages` is the cumulative store (unpruned). `requests` is the per-turn record of what was
+    // actually sent each turn — already pruned — so you can verify the real wire payload over time.
+    const requests = this.requestLog.map((r) => ({
+      turn: r.turn,
+      at: r.at,
+      model: r.model,
+      chars: r.chars,
+      msgCount: r.messages.length,
+      messages: includeImages ? r.messages : stripImages(r.messages),
+    }));
     return {
       exportedAt: new Date().toISOString(),
       taskId: this.taskId,
@@ -1062,6 +1103,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
       systemPrompt: EXEC_SYSTEM,
       tools: TOOL_SCHEMAS,
       messages,
+      requests,
     };
   }
 
@@ -1073,7 +1115,9 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
     await setTabWorking(getPinnedTabId(), false);
     this.setState({ phase: 'complete', workingLabel: undefined });
     notify('dodo · done', 'task complete');
-    void this.persistSnapshot('done');
+    // Await both writes so the completed state (incl. the assistant message) is durable before the
+    // worker can suspend — otherwise a reload restores a stale mid-loop snapshot shown as "halted".
+    await Promise.all([this.persistActiveState(), this.persistSnapshot('done')]);
   }
 
   private async fail(msg: string) {
@@ -1083,7 +1127,8 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
     // Don't also pushMessage a kind:'error' entry — that produced a duplicate red box above the banner.
     this.setState({ phase: 'error', errorMsg: msg, workingLabel: undefined });
     notify('dodo · halted', truncate(msg, 140));
-    if (this.taskId) void this.persistSnapshot('error');
+    await this.persistActiveState();
+    if (this.taskId) await this.persistSnapshot('error');
   }
 }
 
@@ -1146,8 +1191,69 @@ function detailFor(name: ToolName, result: unknown): string | undefined {
   return undefined;
 }
 
+// snapshot/extract results pile up in the conversation and get re-sent every turn, but a stale
+// one is dead weight — its `data-sel` refs no longer resolve once the page changes (the system
+// prompt says as much). Keep the most recent few live and replace older ones with a short stub.
+// Pure: returns a shallow copy, never mutates the stored conversation (the UI rehydrates from it).
+const LIVE_PAGE_RESULTS = 2;
+const SUPERSEDED_STUB =
+  '[superseded snapshot — the page has since changed; call snapshot()/extract() again for the current DOM and fresh refs]';
+
+// Log exactly what's being sent to the provider each turn: a collapsed group with one line per
+// message (role · part kinds · sizes · previews) plus the raw payload object for expansion in
+// the service-worker devtools console. `messages` here is the post-prune payload, not the store.
+function logChatRequest(turn: number, model: string, messages: ChatMessage[]): number {
+  const preview = (s: string, n = 80) => s.replace(/\s+/g, ' ').trim().slice(0, n);
+  const size = (v: unknown) => (typeof v === 'string' ? v.length : JSON.stringify(v ?? '').length);
+  let totalChars = 0;
+  const lines = messages.map((m, i) => {
+    const parts = m.parts.map((p) => {
+      switch (p.type) {
+        case 'text': totalChars += p.text.length; return `text(${p.text.length}) "${preview(p.text)}"`;
+        case 'image': return `image(${p.mimeType})`;
+        case 'tool_call': return `call ${p.name}(${preview(JSON.stringify(p.args ?? {}), 60)})`;
+        case 'tool_result': { const n = size(p.result); totalChars += n; return `result ${p.name}${p.isError ? '!' : ''}(${n})`; }
+      }
+    });
+    return `#${i} ${m.role}: ${parts.join(', ')}`;
+  });
+  log.group(`turn ${turn} → chat · ${model} · ${messages.length} msgs · ~${totalChars} chars`);
+  for (const l of lines) log.info(l);
+  log.info('payload', { systemPrompt: EXEC_SYSTEM, messages });
+  log.groupEnd();
+  return totalChars;
+}
+
+function pruneStaleToolResults(messages: ChatMessage[]): ChatMessage[] {
+  let kept = 0;
+  // Walk newest→oldest so the most recent snapshot/extract results stay intact.
+  const pruned = messages
+    .slice()
+    .reverse()
+    .map((m) => {
+      let changed = false;
+      const parts = m.parts.map((p) => {
+        if (p.type === 'tool_result' && !p.isError && (p.name === 'snapshot' || p.name === 'extract')) {
+          if (kept < LIVE_PAGE_RESULTS) {
+            kept++;
+            return p;
+          }
+          changed = true;
+          return { ...p, result: SUPERSEDED_STUB };
+        }
+        return p;
+      });
+      return changed ? { ...m, parts } : m;
+    })
+    .reverse();
+  return pruned;
+}
+
 function serializeConversation(messages: ChatMessage[]): SavedConversationMessage[] {
-  return messages.map((m) => ({
+  // Snapshot/extract results are the bulk of conversation size and their refs are stale on restore
+  // anyway — collapse all but the most recent few to a stub so saved history stays small. (Without
+  // this, full page DOM × every turn × up to HISTORY_MAX rows blows the storage quota.)
+  return pruneStaleToolResults(messages).map((m) => ({
     role: m.role,
     parts: m.parts.map((p): SavedConversationPart => {
       if (p.type === 'image') return { type: 'image_omitted', mimeType: p.mimeType };

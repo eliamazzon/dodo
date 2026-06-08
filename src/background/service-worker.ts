@@ -21,8 +21,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // DODO → "service worker"):
 //   copy(dodoExport())          copies the full LLM-view JSON to the clipboard
 //   dodoExport(false)           same but with image base64 omitted (smaller)
-// The returned object is the exact payload the orchestrator LLM sees: system prompt,
-// tool schemas, and the raw conversation (tool calls, tool outputs, images).
+// The returned object has: systemPrompt, tool schemas, `messages` (the cumulative
+// conversation store, unpruned), and `requests` — a per-turn record of the exact
+// post-prune payload actually sent each turn (turn, model, char count, messages).
 (globalThis as unknown as { dodoExport: (includeImages?: boolean) => unknown }).dodoExport =
   (includeImages = true) => agent.exportForLLM(includeImages);
 

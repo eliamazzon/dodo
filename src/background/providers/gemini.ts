@@ -106,10 +106,13 @@ export const GeminiProvider: ModelProvider = {
     }
 
     const url = `${BASE}/models/${encodeURIComponent(req.model)}:generateContent?key=${encodeURIComponent(req.apiKey)}`;
+    const payload = JSON.stringify(body);
+    // Ground-truth log of the exact wire body sent to Gemini (post-transform, post-prune).
+    console.log('%c[dodo]', 'color:#6b4ea3;font-weight:600', `gemini ${req.model} → ${payload.length} chars`, body);
     const res = await fetchWithRetry(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: payload,
     });
     if (!res.ok) {
       const errBody = await res.text();

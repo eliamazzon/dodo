@@ -300,6 +300,32 @@ const ATTR_ALLOW = [
   'tabindex', 'contenteditable',
 ];
 
+// State words worth surfacing from `class`. The raw class string is otherwise pure framework
+// noise (grid/layout/utility classes) the model never acts on — it interacts via `data-sel`.
+// These tokens (and only these) carry signal sites often encode in `class` rather than aria-*.
+const STATE_WORDS = new Set([
+  'active', 'selected', 'checked', 'disabled', 'expanded', 'collapsed', 'open', 'show', 'shown',
+  'hidden', 'current', 'highlighted', 'focused', 'loading', 'error', 'invalid', 'pressed',
+]);
+
+// Pull recognized state tokens out of a class string, emitting nothing for the rest. Handles
+// plain tokens ("disabled"), BEM state suffixes ("cmp-tabs__tab--active" → "active"),
+// hyphenated suffixes ("swiper-slide-active" → "active") and "is-" prefixes ("is-selected").
+function stateTokens(cls: string): string {
+  const found = new Set<string>();
+  for (const chunk of cls.split(/[\s_]+/)) {
+    if (!chunk) continue;
+    // candidate words: the whole chunk, its trailing BEM segment, and the last hyphen segment
+    const bem = chunk.includes('--') ? chunk.slice(chunk.lastIndexOf('--') + 2) : '';
+    const candidates = [chunk, bem, chunk.replace(/^is-/, ''), chunk.slice(chunk.lastIndexOf('-') + 1)];
+    for (const c of candidates) {
+      const w = c.toLowerCase();
+      if (STATE_WORDS.has(w)) found.add(w);
+    }
+  }
+  return [...found].join(' ');
+}
+
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -325,7 +351,11 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
     const id = (el as HTMLElement).id;
     if (id) parts.push(`id="${escapeAttr(id)}"`);
     const cls = el.getAttribute('class');
-    if (cls) parts.push(`class="${escapeAttr(cls.length > 80 ? cls.slice(0, 80) : cls)}"`);
+    if (cls) {
+      // Drop the raw class (framework/layout noise) but keep any state signal it encodes.
+      const st = stateTokens(cls);
+      if (st) parts.push(`state="${escapeAttr(st)}"`);
+    }
     for (const name of ATTR_ALLOW) {
       if (!el.hasAttribute(name)) continue;
       const v = el.getAttribute(name) ?? '';

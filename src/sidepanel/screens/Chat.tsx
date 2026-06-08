@@ -13,6 +13,8 @@ import { FileArtifactCard } from '../cards/FileArtifactCard';
 import { BrowserTabCard } from '../cards/BrowserTabCard';
 import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
 
+const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+
 const toolIcon = (name: ToolName) => {
   switch (name) {
     case 'navigate': return <Ic.Globe size={12}/>;
@@ -203,13 +205,14 @@ function renderMessage(m: UIMessage, props: {
     return <UserMsg c={c} key={m.id}>{m.text}</UserMsg>;
   }
   if (m.kind === 'assistant') {
-    const hasMeta = m.tokens != null || m.elapsed != null;
+    const hasTokens = m.tokensIn != null || m.tokensOut != null;
+    const hasMeta = hasTokens || m.elapsed != null;
     return (
       <div key={m.id} style={{ marginBottom: 16, padding: '2px 0' }}>
         <Markdown text={m.text} style={{ fontSize: 13, lineHeight: 1.55, color: c.ink }}/>
         {hasMeta && (
           <div style={{ display: 'flex', gap: 8, marginTop: 5, fontSize: 10, color: c.subtle, userSelect: 'none' }}>
-            {m.tokens != null && <span>{m.tokens >= 1000 ? `${(m.tokens / 1000).toFixed(1)}k` : m.tokens} tokens</span>}
+            {hasTokens && <span>↑{fmtTokens(m.tokensIn ?? 0)} ↓{fmtTokens(m.tokensOut ?? 0)} tokens</span>}
             {m.turns != null && <span>· {m.turns} {m.turns === 1 ? 'turn' : 'turns'}</span>}
             {m.elapsed != null && <span>· {m.elapsed >= 60000 ? `${Math.floor(m.elapsed / 60000)}m ${Math.floor((m.elapsed % 60000) / 1000)}s` : `${(m.elapsed / 1000).toFixed(1)}s`}</span>}
           </div>

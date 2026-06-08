@@ -6,7 +6,7 @@
   "action": { "default_title": "DODO" },
   "side_panel": { "default_path": "src/sidepanel/index.html" },
   "background": { "service_worker": "background/service-worker.js", "type": "module" },
-  "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting", "notifications"],
+  "permissions": ["sidePanel", "storage", "unlimitedStorage", "tabs", "activeTab", "scripting", "notifications"],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "_execute_action": {
