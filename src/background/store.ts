@@ -1,5 +1,8 @@
-// Chrome storage access layer — all persisted state (settings, allowlist, history) lives in chrome.storage.local.
+// Persistence access layer. Settings + allowlist live in chrome.storage.local (small, change-rarely,
+// and we want the free cross-context durability). History lives in IndexedDB via historyRepo (db.ts) —
+// this module delegates to it so callers keep the same function surface regardless of backend.
 import { DEFAULT_SETTINGS, type Settings, type HistoryItem } from '../shared/types';
+import { historyRepo } from './db';
 
 type StoreShape = {
   settings: Settings;
@@ -7,16 +10,20 @@ type StoreShape = {
   history: HistoryItem[];
 };
 
-const KEYS = ['settings', 'allowlist', 'history'] as const;
-const HISTORY_MAX = 200; // oldest items are evicted once this cap is reached
+const KEYS = ['settings', 'allowlist'] as const;
 const DEFAULT_ALLOWLIST = ['*.google.com', '*.github.com', '*.notion.so', '*.wikipedia.org'];
 
 export async function loadStore(): Promise<StoreShape> {
-  const raw = await chrome.storage.local.get(KEYS as unknown as string[]);
+  // historyRepo.list() returns metadata only (conversation/state live in a separate store, loaded
+  // on demand) — so the broadcast payload stays small no matter how large history grows.
+  const [raw, history] = await Promise.all([
+    chrome.storage.local.get(KEYS as unknown as string[]),
+    historyRepo.list(),
+  ]);
   return {
     settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
     allowlist: (raw.allowlist as string[] | undefined) ?? DEFAULT_ALLOWLIST,
-    history: (raw.history as HistoryItem[] | undefined) ?? [],
+    history,
   };
 }
 
@@ -49,46 +56,22 @@ export async function setAllowlist(list: string[]): Promise<void> {
   await chrome.storage.local.set({ allowlist: list });
 }
 
+// History is keyed by `id` in IndexedDB; "newest-first, capped" is enforced by the repo at
+// query/write time rather than as a stored array invariant.
 export async function getHistory(): Promise<HistoryItem[]> {
-  const { history } = await loadStore();
-  return history;
+  return historyRepo.list();
 }
 
-export async function appendHistory(item: HistoryItem): Promise<HistoryItem[]> {
-  const list = await getHistory();
-  const next = [item, ...list].slice(0, HISTORY_MAX);
-  await chrome.storage.local.set({ history: next });
-  return next;
-}
-
-export async function upsertHistory(item: HistoryItem): Promise<HistoryItem[]> {
-  const list = await getHistory();
-  const idx = list.findIndex((it) => it.id === item.id);
-  let next: HistoryItem[];
-  if (idx >= 0) {
-    next = list.slice();
-    next[idx] = { ...list[idx], ...item };
-    // move freshly-updated row to the top
-    const [moved] = next.splice(idx, 1);
-    next.unshift(moved);
-  } else {
-    next = [item, ...list];
-  }
-  next = next.slice(0, HISTORY_MAX);
-  await chrome.storage.local.set({ history: next });
-  return next;
+export async function upsertHistory(item: HistoryItem): Promise<void> {
+  await historyRepo.upsert(item);
 }
 
 export async function getHistoryItem(id: string): Promise<HistoryItem | undefined> {
-  const list = await getHistory();
-  return list.find((it) => it.id === id);
+  return historyRepo.get(id);
 }
 
-export async function deleteHistoryItem(id: string): Promise<HistoryItem[]> {
-  const list = await getHistory();
-  const next = list.filter((it) => it.id !== id);
-  await chrome.storage.local.set({ history: next });
-  return next;
+export async function deleteHistoryItem(id: string): Promise<void> {
+  await historyRepo.remove(id);
 }
 
 export function hostMatchesAllowlist(host: string, allowlist: string[]): boolean {

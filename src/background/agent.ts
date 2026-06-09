@@ -209,7 +209,29 @@ class Agent {
       } else {
         this.state = saved;
       }
+      // activeState was persisted with tool results stripped — re-attach them from the conversation
+      // so the restored cards show their responses (same rehydration openHistory does).
+      if (Array.isArray(this.state.messages)) {
+        this.state = { ...this.state, messages: this.rehydrateToolResults(this.state.messages) };
+      }
     } catch {}
+  }
+
+  // Re-attach each tool_activity row's `result` (stripped on persist to save space) from the live
+  // conversation, matched by LLM tool-call id. Used by both reload-restore and reopen-from-history.
+  private rehydrateToolResults(messages: UIMessage[]): UIMessage[] {
+    const resultById = new Map<string, unknown>();
+    for (const m of this.conversation) {
+      if (m.role !== 'tool') continue;
+      for (const p of m.parts) {
+        if (p.type === 'tool_result') resultById.set(p.id, p.result);
+      }
+    }
+    return messages.map((m) =>
+      m.kind === 'tool_activity' && m.callId && resultById.has(m.callId)
+        ? ({ ...m, result: resultById.get(m.callId) } as UIMessage)
+        : m,
+    );
   }
 
   subscribe(l: Listener): () => void {
@@ -458,18 +480,7 @@ class Agent {
     if (!Array.isArray(restored.messages)) restored.messages = [];
     // `result` was stripped on persist (it lives in the conversation) — rehydrate each tool row's
     // response from the deserialized conversation by matching its LLM tool-call id.
-    const resultById = new Map<string, unknown>();
-    for (const m of this.conversation) {
-      if (m.role !== 'tool') continue;
-      for (const p of m.parts) {
-        if (p.type === 'tool_result') resultById.set(p.id, p.result);
-      }
-    }
-    restored.messages = restored.messages.map((m) =>
-      m.kind === 'tool_activity' && m.callId && resultById.has(m.callId)
-        ? { ...m, result: resultById.get(m.callId) }
-        : m,
-    );
+    restored.messages = this.rehydrateToolResults(restored.messages);
     this.state = restored;
     this.emit();
   }

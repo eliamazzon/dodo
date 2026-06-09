@@ -1,6 +1,6 @@
 // Extension lifecycle host — manages the long-lived Chrome Port to the side panel and routes UI messages to the Agent singleton.
 import { agent } from './agent';
-import { loadStore, saveSettings, deleteHistoryItem } from './store';
+import { loadStore, saveSettings, setAllowlist, getSettings, getAllowlist, deleteHistoryItem } from './store';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../shared/messages';
 import { notifyForce } from './notify';
 import { initTabTracking } from './tools';
@@ -72,8 +72,8 @@ chrome.runtime.onConnect.addListener((port) => {
         await saveSettings({ defaultMode: msg.mode });
         void send();
         break;
-      case 'set_approval_mode':
-        await saveSettings({ approvalMode: msg.mode });
+      case 'set_settings':
+        await saveSettings(msg.patch);
         void send();
         break;
       case 'test_notify':
@@ -100,6 +100,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (tab?.windowId != null) {
         chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => undefined);
       }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+  // Onboarding runs in its own page (no long-lived port), so it reads/writes settings + allowlist
+  // through one-shot messages — the background stays the single owner of persisted state.
+  if (msg?.kind === 'get_onboarding') {
+    Promise.all([getSettings(), getAllowlist()]).then(([settings, allowlist]) => {
+      sendResponse({ settings, allowlist });
+    });
+    return true;
+  }
+  if (msg?.kind === 'save_onboarding') {
+    Promise.all([saveSettings(msg.settings), setAllowlist(msg.allowlist)]).then(() => {
       sendResponse({ ok: true });
     });
     return true;

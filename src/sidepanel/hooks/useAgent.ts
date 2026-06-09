@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type ApprovalMode } from '../../shared/types';
+import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode } from '../../shared/types';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../../shared/messages';
 
 export type AgentSnapshot = {
@@ -9,8 +9,10 @@ export type AgentSnapshot = {
   history: HistoryItem[];
 };
 
-const DEFAULT_ALLOWLIST = ['*.google.com', '*.github.com', '*.notion.so', '*.wikipedia.org'];
-
+// The panel never touches chrome.storage directly — the background service worker is the single
+// owner of all persisted state. Every read arrives via the port `state` broadcast (sent on connect
+// and on every change); every write goes back as a PanelToBg message. This keeps the panel agnostic
+// to where data actually lives (chrome.storage today, IndexedDB/cloud later).
 export function useAgent() {
   const [snap, setSnap] = useState<AgentSnapshot>({
     state: INITIAL_AGENT_STATE,
@@ -18,61 +20,45 @@ export function useAgent() {
     allowlist: [],
     history: [],
   });
+  // Flipped on the first `state` message from the background — the worker calls send() immediately
+  // on connect, so this is one round-trip away. App shows a skeleton until then.
   const [hydrated, setHydrated] = useState(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const unmountedRef = useRef(false);
-
-  // Pre-populate from storage before the port connects to avoid flashing the empty screen.
-  useEffect(() => {
-    void chrome.storage.local.get(['activeState', 'settings', 'allowlist', 'history']).then((raw) => {
-      setSnap({
-        state: (raw.activeState as AgentState | undefined) ?? INITIAL_AGENT_STATE,
-        settings: { ...DEFAULT_SETTINGS, ...((raw.settings as Partial<Settings> | undefined) ?? {}) },
-        allowlist: (raw.allowlist as string[] | undefined) ?? DEFAULT_ALLOWLIST,
-        history: (raw.history as HistoryItem[] | undefined) ?? [],
-      });
-      setHydrated(true);
-    });
-  }, []);
 
   useEffect(() => {
     unmountedRef.current = false;
     const onMessage = (msg: BgToPanel) => {
       if (msg.kind === 'state') {
         setSnap({ state: msg.state, settings: msg.settings, allowlist: msg.allowlist, history: msg.history });
+        setHydrated(true);
       }
     };
     const connect = () => {
       if (unmountedRef.current) return;
-      const port = chrome.runtime.connect({ name: PORT_NAME });
+      // During an extension reload the page's runtime context is invalidated and connect() throws.
+      // Catch it and back off rather than letting it bubble or spin tightly — the page will be
+      // reloaded by Chrome once the new background is live.
+      let port: chrome.runtime.Port;
+      try {
+        port = chrome.runtime.connect({ name: PORT_NAME });
+      } catch {
+        if (!unmountedRef.current) setTimeout(connect, 500);
+        return;
+      }
       portRef.current = port;
       port.onMessage.addListener(onMessage);
       port.onDisconnect.addListener(() => {
         portRef.current = null;
-        if (!unmountedRef.current) setTimeout(connect, 200);
+        if (!unmountedRef.current) setTimeout(connect, 500);
       });
     };
     connect();
-
-    const onStorageChange = (
-      changes: Record<string, chrome.storage.StorageChange>,
-      area: chrome.storage.AreaName,
-    ) => {
-      if (area !== 'local') return;
-      setSnap((prev) => ({
-        ...prev,
-        settings: changes.settings ? { ...DEFAULT_SETTINGS, ...(changes.settings.newValue as Settings) } : prev.settings,
-        allowlist: changes.allowlist ? (changes.allowlist.newValue as string[]) ?? prev.allowlist : prev.allowlist,
-        history: changes.history ? (changes.history.newValue as HistoryItem[]) ?? prev.history : prev.history,
-      }));
-    };
-    chrome.storage.onChanged.addListener(onStorageChange);
 
     return () => {
       unmountedRef.current = true;
       try { portRef.current?.disconnect(); } catch {}
       portRef.current = null;
-      chrome.storage.onChanged.removeListener(onStorageChange);
     };
   }, []);
 
@@ -89,6 +75,7 @@ export function useAgent() {
     port.onMessage.addListener((msg: BgToPanel) => {
       if (msg.kind === 'state') {
         setSnap({ state: msg.state, settings: msg.settings, allowlist: msg.allowlist, history: msg.history });
+        setHydrated(true);
       }
     });
     port.onDisconnect.addListener(() => { portRef.current = null; });
@@ -107,19 +94,9 @@ export function useAgent() {
     retry: () => send({ kind: 'retry' }),
     reset: () => send({ kind: 'reset' }),
     setMode: (mode: Mode) => send({ kind: 'set_mode', mode }),
-    setApprovalMode: (mode: ApprovalMode) => send({ kind: 'set_approval_mode', mode }),
+    setSettings: (patch: Partial<Settings>) => send({ kind: 'set_settings', patch }),
     testNotify: () => send({ kind: 'test_notify' }),
     openHistory: (id: string) => send({ kind: 'open_history', id }),
     deleteHistory: (id: string) => send({ kind: 'delete_history', id }),
   };
-}
-
-export async function saveSettingsDirect(patch: Partial<Settings>): Promise<void> {
-  const raw = await chrome.storage.local.get(['settings']);
-  const current = { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } as Settings;
-  await chrome.storage.local.set({ settings: { ...current, ...patch } });
-}
-
-export async function saveAllowlistDirect(list: string[]): Promise<void> {
-  await chrome.storage.local.set({ allowlist: list });
 }

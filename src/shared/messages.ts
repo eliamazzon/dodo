@@ -1,4 +1,4 @@
-import type { AgentState, Settings, HistoryItem, Mode, ApprovalMode } from './types';
+import type { AgentState, Settings, HistoryItem, Mode } from './types';
 
 export type PanelToBg =
   | { kind: 'send_message'; text: string }
@@ -10,7 +10,7 @@ export type PanelToBg =
   | { kind: 'retry' }
   | { kind: 'reset' }
   | { kind: 'set_mode'; mode: Mode }
-  | { kind: 'set_approval_mode'; mode: ApprovalMode }
+  | { kind: 'set_settings'; patch: Partial<Settings> }
   | { kind: 'test_notify' }
   | { kind: 'open_history'; id: string }
   | { kind: 'delete_history'; id: string };

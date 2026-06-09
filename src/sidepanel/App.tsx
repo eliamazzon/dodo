@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { DODO_LIGHT } from '../shared/tokens';
-import { useAgent, saveSettingsDirect } from './hooks/useAgent';
+import { useAgent } from './hooks/useAgent';
 import { Empty } from './screens/Empty';
 import { Chat } from './screens/Chat';
 import { Settings } from './screens/Settings';
@@ -16,7 +16,7 @@ export function App() {
   const { snap } = a;
 
   if (view === 'settings') {
-    return <Settings c={c} settings={snap.settings} onClose={() => setView('agent')} onTestNotify={a.testNotify}/>;
+    return <Settings c={c} settings={snap.settings} onUpdate={a.setSettings} onClose={() => setView('agent')} onTestNotify={a.testNotify}/>;
   }
   if (view === 'history') {
     return (
@@ -38,7 +38,7 @@ export function App() {
     mode: snap.settings.defaultMode,
     providerId: snap.settings.providerId,
     availableModels: provider.availableModels,
-    onSelectModel: (id: string) => { void saveSettingsDirect({ model: id }); },
+    onSelectModel: (id: string) => { a.setSettings({ model: id }); },
     onChangeMode: a.setMode,
     onNewTask: a.reset,
     onOpenSettings: () => setView('settings'),
@@ -78,10 +78,10 @@ export function App() {
       onOpenHistory={common.onOpenHistory}
       showNotifyBanner={showNotifyBanner}
       onEnableNotify={() => {
-        void saveSettingsDirect({ notifyEnabled: true });
+        a.setSettings({ notifyEnabled: true });
         a.testNotify();
       }}
-      onDismissNotify={() => { void saveSettingsDirect({ notifyDismissed: true }); }}
+      onDismissNotify={() => { a.setSettings({ notifyDismissed: true }); }}
     />
   );
 }

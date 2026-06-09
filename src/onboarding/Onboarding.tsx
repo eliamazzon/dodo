@@ -15,10 +15,10 @@ export function Onboarding() {
   const [allowlist, setAllowlist] = useState<string[]>(DEFAULT_ALLOW);
 
   useEffect(() => {
-    chrome.storage.local.get(['settings', 'allowlist']).then((raw) => {
-      if (raw.settings) setSettings({ ...DEFAULT_SETTINGS, ...raw.settings });
-      if (raw.allowlist) setAllowlist(raw.allowlist as string[]);
-    });
+    chrome.runtime.sendMessage({ kind: 'get_onboarding' }).then((res) => {
+      if (res?.settings) setSettings({ ...DEFAULT_SETTINGS, ...res.settings });
+      if (res?.allowlist) setAllowlist(res.allowlist as string[]);
+    }).catch(() => {});
   }, []);
 
   const dot = (i: number) => (
@@ -30,10 +30,11 @@ export function Onboarding() {
 
   const next = async () => {
     if (step === 4) {
-      await chrome.storage.local.set({
+      await chrome.runtime.sendMessage({
+        kind: 'save_onboarding',
         settings: { ...settings, onboarded: true },
         allowlist,
-      });
+      }).catch(() => {});
       window.close();
       return;
     }

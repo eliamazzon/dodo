@@ -6,14 +6,14 @@ import { PanelShell, Body } from '../components/PanelShell';
 import { Switch, Toggle3 } from '../components/atoms';
 import { SettingRow } from '../cards/SettingRow';
 import type { Settings as SettingsT, Mode, ApprovalMode } from '../../shared/types';
-import { saveSettingsDirect } from '../hooks/useAgent';
 import { getProvider } from '../../background/providers';
 
 export function Settings({
-  c, settings, onClose, onTestNotify,
+  c, settings, onUpdate, onClose, onTestNotify,
 }: {
   c: Palette;
   settings: SettingsT;
+  onUpdate: (patch: Partial<SettingsT>) => void;
   onClose: () => void;
   onTestNotify: () => void;
 }) {
@@ -23,7 +23,7 @@ export function Settings({
 
   const provider = getProvider(settings.providerId);
 
-  const update = (patch: Partial<SettingsT>) => { void saveSettingsDirect(patch); };
+  const update = onUpdate;
 
   const maskedKey = settings.apiKey
     ? `${settings.apiKey.slice(0, 4)}${'•'.repeat(Math.max(8, settings.apiKey.length - 8))}${settings.apiKey.slice(-4)}`
