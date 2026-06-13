@@ -68,18 +68,3 @@ export function Wordmark({ size = 14, color = 'currentColor' }: { size?: number;
     </span>
   );
 }
-
-export function DodoMark({ size = 32, color = 'currentColor' }: { size?: number; color?: string }) {
-  return (
-    <svg
-      width={size} height={size} viewBox="0 0 32 32" fill="none"
-      stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
-    >
-      <path d="M5 19 Q5 11 14 11 Q22 11 22 18 Q22 25 13 25 Q5 25 5 19 Z"/>
-      <path d="M19 12 Q19 7 23 7 Q26 7 26 11"/>
-      <path d="M26 10 L29 12 Q30.5 13.5 28.5 14 L25.5 13"/>
-      <circle cx="23.2" cy="9.5" r="0.8" fill={color}/>
-      <path d="M5 18 Q2.5 16 3.5 14"/>
-    </svg>
-  );
-}

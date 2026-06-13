@@ -1,6 +1,6 @@
 import { Fragment, useState, useEffect } from 'react';
 import { DODO_LIGHT, DODO_FONT } from '../shared/tokens';
-import { DodoMark, Ic, Wordmark } from '../shared/icons';
+import { Ic, Wordmark } from '../shared/icons';
 import { PanelShell, Body } from '../sidepanel/components/PanelShell';
 import { PrimaryBtn, GhostBtn } from '../sidepanel/components/atoms';
 import { GeminiProvider } from '../background/providers/gemini';
@@ -29,7 +29,7 @@ export function Onboarding() {
   );
 
   const next = async () => {
-    if (step === 4) {
+    if (step === 5) {
       await chrome.runtime.sendMessage({
         kind: 'save_onboarding',
         settings: { ...settings, onboarded: true },
@@ -55,9 +55,9 @@ export function Onboarding() {
         }}>
           <Wordmark size={13}/>
           <span style={{ flex: 1 }}/>
-          {[0,1,2,3].map((i) => <Fragment key={i}>{dot(i)}</Fragment>)}
+          {[0,1,2,3,4].map((i) => <Fragment key={i}>{dot(i)}</Fragment>)}
           <span style={{ flex: 1, maxWidth: 8 }}/>
-          <span style={{ fontSize: 10.5, color: c.subtle }}>{step}/4</span>
+          <span style={{ fontSize: 10.5, color: c.subtle }}>{step}/5</span>
         </div>
         <Body c={c} pad="24px 28px 0">
           {step === 1 && <Welcome/>}
@@ -75,6 +75,7 @@ export function Onboarding() {
             />
           )}
           {step === 4 && <Ready settings={settings} allowlist={allowlist}/>}
+          {step === 5 && <Pin/>}
         </Body>
         <div style={{
           display: 'flex', gap: 8, padding: '12px 16px',
@@ -82,7 +83,7 @@ export function Onboarding() {
         }}>
           {step > 1 && <GhostBtn c={c} onClick={back}>back</GhostBtn>}
           <span style={{ flex: 1 }}/>
-          <PrimaryBtn c={c} kbd="⏎" onClick={next}>{step === 4 ? 'start' : 'continue'}</PrimaryBtn>
+          <PrimaryBtn c={c} kbd="⏎" onClick={next}>{step === 5 ? 'start' : 'continue'}</PrimaryBtn>
         </div>
       </PanelShell>
     </div>
@@ -97,9 +98,9 @@ function Welcome() {
         width: 56, height: 56, borderRadius: 10,
         border: `1.5px solid ${c.accent}`,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        marginBottom: 18, color: c.accent,
+        marginBottom: 18,
       }}>
-        <DodoMark size={34} color={c.accent}/>
+        <img src={chrome.runtime.getURL('icons/spark-128.png')} alt="" width={34} height={34}/>
       </div>
       <h2 style={{
         fontFamily: DODO_FONT, fontSize: 20, fontWeight: 600,
@@ -197,7 +198,11 @@ function Provider({
         )}
       </div>
       <div style={{ marginTop: 14, fontSize: 11, color: c.muted, lineHeight: 1.55 }}>
-        get a free key at <span style={{ color: c.accent }}>aistudio.google.com/apikey</span>.
+        get a free key at{' '}
+        <a
+          onClick={() => chrome.tabs.create({ url: 'https://aistudio.google.com/apikey' })}
+          style={{ color: c.accent, textDecoration: 'underline', textUnderlineOffset: 2, cursor: 'pointer' }}
+        >aistudio.google.com/apikey</a>.
       </div>
     </div>
   );
@@ -274,11 +279,46 @@ function Ready({ settings, allowlist }: { settings: Settings; allowlist: string[
         <div><span style={{ color: c.muted }}>hosts    </span>{allowlist.length} allowed</div>
         <div><span style={{ color: c.muted }}>mode     </span>{mode === 'ask' ? 'ask before acting' : mode === 'auto' ? 'act on allowlist' : 'watch only'}</div>
       </div>
-      <p style={{ fontSize: 12, color: c.muted, margin: '14px 0 0', lineHeight: 1.55 }}>
-        pin dodo to your toolbar to open it from any tab. press{' '}
-        <kbd style={{ background: c.surface, border: `1px solid ${c.border}`, padding: '0 4px', borderRadius: 3, fontFamily: DODO_FONT, fontSize: 10.5 }}>⌘⇧D</kbd>
-        {' '}to summon it anywhere.
+    </div>
+  );
+}
+
+function Pin() {
+  const c = DODO_LIGHT;
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: c.subtle, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>last thing</div>
+      <h2 style={{ fontFamily: DODO_FONT, fontSize: 17, fontWeight: 600, margin: '0 0 8px' }}>
+        pin dodo to your toolbar
+      </h2>
+      <p style={{ fontSize: 12, color: c.muted, margin: '0 0 14px', lineHeight: 1.55 }}>
+        click the puzzle-piece icon in your toolbar, find dodo, then click the pin so it's always one click away.
       </p>
+      <img
+        src={chrome.runtime.getURL('onboarding/pin.png')}
+        alt="the browser extensions menu, with the pin icon next to DODO highlighted"
+        style={{ width: '100%', display: 'block', borderRadius: 8, border: `1px solid ${c.border}` }}
+      />
+      <div style={{
+        marginTop: 18, display: 'flex', alignItems: 'center', gap: 14,
+        padding: '14px 16px', borderRadius: 8,
+        border: `1px solid ${c.accent}`, background: c.accentBg,
+      }}>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          {['opt', 'L'].map((k) => (
+            <kbd key={k} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              minWidth: 34, height: 34, padding: '0 8px',
+              fontFamily: DODO_FONT, fontSize: 15, fontWeight: 700, color: c.accentInk,
+              background: c.surface2, border: `1px solid ${c.accent}`, borderRadius: 6,
+              boxShadow: `0 2px 0 ${c.accent}`,
+            }}>{k}</kbd>
+          ))}
+        </div>
+        <div style={{ fontSize: 12.5, color: c.ink, lineHeight: 1.5 }}>
+          press <strong>opt + L</strong> anywhere to open dodo — no toolbar click needed.
+        </div>
+      </div>
     </div>
   );
 }

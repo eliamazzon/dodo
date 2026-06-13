@@ -44,7 +44,8 @@ RULES:
 - If a click/type fails with "no element matches", snapshot again — the page may have changed.
 - A typed value that must become a chip/selection (recipient/email/tag in a To/CC field, or an autocomplete/combobox pick) is NOT committed until you press({key:"Enter"}). If such a type() returned a non-empty \`value\` but no chip/result appeared, do NOT retype — press({key:"Enter"}) once to commit. Plain text fields (subject, message body, ordinary form inputs) need NO press — once type() returns your \`value\`, that field is done; move on.
 - Use the datetime/location context to produce accurate results.
-- Never navigate to a host not in the allowlist without going through the navigate() tool's permission flow.`;
+- Never navigate to a host not in the allowlist without going through the navigate() tool's permission flow.
+- Google Sheets (and Google Docs/Slides) render ALL grid/document content as canvas — snapshot() and extract() show only the toolbar chrome, never cell values or document body. BEFORE doing anything else on a Google Sheets page, enable accessibility mode with press({key:"z", modifiers:["Meta","Alt"]}) (⌘⌥Z on Mac). Wait for the DOM to update, then snapshot() — cells will now render as real DOM elements you can read. Sheet tab clicks may silently fail; switch sheets via URL instead: navigate({url: "https://docs.google.com/spreadsheets/d/ID/edit?gid=SHEET_GID#gid=SHEET_GID"}) where the gid is visible in the current URL's #gid= hash.`;
 
 const PLAN_SYSTEM = `You are DODO's planner. The orchestrator agent asks you to draft a deterministic action script for a specific multi-step browser sub-task.
 

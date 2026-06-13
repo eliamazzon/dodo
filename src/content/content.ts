@@ -915,7 +915,14 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       const before = interactiveElements(false);
       (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' });
       await showCursor('click', el, elementLabel(el)); // glide the on-page cursor over, then click
-      (el as HTMLElement).click();
+      // Dispatch a realistic pointer+mouse sequence before click so SPAs that listen to
+      // mousedown/pointerdown (Google Sheets tabs, Notion, Figma, etc.) respond correctly.
+      const ct = el as HTMLElement;
+      ct.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, isPrimary: true }));
+      ct.dispatchEvent(new MouseEvent('mousedown',     { bubbles: true, cancelable: true }));
+      ct.dispatchEvent(new PointerEvent('pointerup',   { bubbles: true, cancelable: true, isPrimary: true }));
+      ct.dispatchEvent(new MouseEvent('mouseup',       { bubbles: true, cancelable: true }));
+      ct.click();
       // Let the page settle — clicks that open dropdowns/menus/dialogs need a beat before
       // the post-click snapshot, otherwise the new overlay items aren't in the DOM yet.
       await new Promise<void>((r) => setTimeout(r, 350));
@@ -1040,7 +1047,8 @@ async function handle(op: ContentOp): Promise<ContentResult> {
           doc.execCommand('copy');
         } else if (op.key === 'x') {
           doc.execCommand('cut');
-        } else if (op.key === 'z') {
+        } else if (op.key === 'z' && !mods.includes('Alt')) {
+          // Meta+Alt+z is ⌘⌥Z (e.g. Google Sheets screen-reader mode) — not undo.
           doc.execCommand(mods.includes('Shift') ? 'redo' : 'undo');
         } else if (op.key === 'v') {
           doc.execCommand('paste');
@@ -1048,10 +1056,19 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       }
 
       for (const type of ['keydown', 'keyup'] as const) {
-        focused.dispatchEvent(new KeyboardEvent(type, {
+        const kev = new KeyboardEvent(type, {
           key: meta.key, code: meta.code, keyCode: meta.keyCode, which: meta.keyCode,
           bubbles: true, cancelable: true, ...modInit,
-        }));
+        });
+        focused.dispatchEvent(kev);
+        // Also fire on document for apps that register global shortcut listeners there
+        // (e.g. Google Sheets ⌘⌥Z screen-reader mode, Gmail keyboard shortcuts).
+        if (!kev.defaultPrevented) {
+          doc.dispatchEvent(new KeyboardEvent(type, {
+            key: meta.key, code: meta.code, keyCode: meta.keyCode, which: meta.keyCode,
+            bubbles: false, cancelable: true, ...modInit,
+          }));
+        }
       }
       await new Promise<void>((r) => setTimeout(r, 350));
       const after = interactiveElements(true);
