@@ -3,11 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "description": "Open-source browser agent Chrome extension (Gemini, BYOK).",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
     "build": "tsc -b && vite build",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "setup": "node scripts/install.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.3",

@@ -12,7 +12,6 @@ export type Settings = {
   approvalMode: ApprovalMode;
   confirmNavigation: boolean;
   screenshotRedaction: boolean;
-  telemetry: boolean;
   notifyEnabled: boolean;
   notifyDismissed: boolean;
   onboarded: boolean;
@@ -26,7 +25,6 @@ export const DEFAULT_SETTINGS: Settings = {
   approvalMode: 'always_ask',
   confirmNavigation: true,
   screenshotRedaction: true,
-  telemetry: false,
   notifyEnabled: false,
   notifyDismissed: false,
   onboarded: false,

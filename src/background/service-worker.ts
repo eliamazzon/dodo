@@ -94,7 +94,11 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Only honor messages from this extension's own pages/content scripts. There is no
+  // `externally_connectable` entry, so web pages already can't reach here — this is
+  // defense-in-depth so a future manifest change can't silently expose settings/the API key.
+  if (sender.id !== chrome.runtime.id) return false;
   if (msg?.kind === 'open_sidepanel') {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([tab]) => {
       if (tab?.windowId != null) {

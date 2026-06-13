@@ -177,11 +177,6 @@ export function Settings({
           label="screenshot redaction"
           action={<Switch c={c} on={settings.screenshotRedaction} onClick={() => update({ screenshotRedaction: !settings.screenshotRedaction })}/>}
         />
-        <SettingRow c={c}
-          label="telemetry"
-          hint="off by default. dodo never phones home."
-          action={<Switch c={c} on={settings.telemetry} onClick={() => update({ telemetry: !settings.telemetry })}/>}
-        />
       </Body>
     </PanelShell>
   );
