@@ -13,7 +13,7 @@ import type {
 import { INITIAL_AGENT_STATE } from '../shared/types';
 import type { ChatMessage, ContentPart } from './providers/types';
 import { getProvider } from './providers';
-import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab, getPinnedTabId, consumePendingNewTab, listTabs, setTabWorking, waitForTabComplete } from './tools';
+import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab, getPinnedTabId, consumePendingNewTab, listTabs, setTabWorking, waitForTabComplete, armPopupWatch } from './tools';
 import { getSettings, upsertHistory, getHistoryItem, addAllowedHost } from './store';
 import { isHostAllowed } from './permissions';
 import { log } from './log';
@@ -747,21 +747,28 @@ class Agent {
       return r.data;
     }
     if (name === 'click') {
-      const r = await runContentOp(tab.id, { op: 'click', selector: String(args.selector ?? '') });
+      armPopupWatch();
+      const showOverlay = (await getSettings()).showCursorOverlay;
+      const r = await runContentOp(tab.id, { op: 'click', selector: String(args.selector ?? ''), showOverlay });
       if (!r.ok) throw new Error(r.error);
       return this.maybeFollowNewTab(r.data);
     }
     if (name === 'type') {
-      const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? ''), perChar: Boolean(args.perChar) });
+      armPopupWatch();
+      const showOverlay = (await getSettings()).showCursorOverlay;
+      const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? ''), perChar: Boolean(args.perChar), showOverlay });
       if (!r.ok) throw new Error(r.error);
       return this.maybeFollowNewTab(r.data);
     }
     if (name === 'press') {
+      armPopupWatch();
+      const showOverlay = (await getSettings()).showCursorOverlay;
       const r = await runContentOp(tab.id, {
         op: 'press',
         key: String(args.key ?? ''),
         selector: args.selector ? String(args.selector) : undefined,
         modifiers: Array.isArray(args.modifiers) ? args.modifiers : undefined,
+        showOverlay,
       });
       if (!r.ok) throw new Error(r.error);
       return this.maybeFollowNewTab(r.data);
@@ -1168,11 +1175,11 @@ function parsePlan(text: string): Plan | null {
 }
 
 function labelFor(name: ToolName, args: Record<string, unknown>): string {
-  if (name === 'navigate') return `navigate to ${hostFromUrl(String(args.url ?? '')) || args.url}`;
+  if (name === 'navigate') return String(hostFromUrl(String(args.url ?? '')) || args.url || '');
   if (name === 'screenshot') return 'capture viewport';
   if (name === 'snapshot') return args.element ? `expand ${args.element}` : 'read page DOM';
-  if (name === 'click') return `click ${args.selector ?? ''}`;
-  if (name === 'type') return `type into ${args.selector ?? ''}`;
+  if (name === 'click') return String(args.selector ?? '');
+  if (name === 'type') return String(args.selector ?? '');
   if (name === 'press') {
     const mods = Array.isArray(args.modifiers) && args.modifiers.length > 0
       ? args.modifiers.map((m: string) => m === 'Meta' ? 'Cmd' : m).join('+') + '+'
@@ -1200,6 +1207,14 @@ function detailFor(name: ToolName, result: unknown): string | undefined {
     if (typeof r?.html === 'string') return `${r.html.length} chars`;
   }
   if (name === 'screenshot') return 'jpeg · q70';
+  if (name === 'click') {
+    const r = result as { label?: string };
+    if (r?.label) return `"${r.label}"`;
+  }
+  if (name === 'type') {
+    const r = result as { label?: string; value?: string };
+    if (r?.label) return r.value ? `"${truncate(r.value, 40)}" into "${r.label}"` : `into "${r.label}"`;
+  }
   return undefined;
 }
 

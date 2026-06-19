@@ -205,13 +205,24 @@ export function getPinnedTabId(): number | null {
 let pendingNewTabId: number | null = null;
 let tabTrackingStarted = false;
 
+// Chrome stamps openerTabId on any new tab created while a given tab is active — including a
+// plain user-initiated Cmd/Ctrl+T, not just window.open()/target="_blank". So an openerTabId
+// match alone can't tell an agent-triggered popup from the user just opening a new tab. Only
+// treat it as agent-triggered if it lands inside a short window right after we dispatch a
+// click/type/press tool call.
+let popupWatchUntil = 0;
+
+export function armPopupWatch(windowMs = 1500) {
+  popupWatchUntil = Date.now() + windowMs;
+}
+
 // Register tab-lifecycle listeners once. onCreated flags tabs spawned by the active tab so the
 // agent can auto-follow them; onRemoved keeps our ids from pointing at dead tabs.
 export function initTabTracking() {
   if (tabTrackingStarted) return;
   tabTrackingStarted = true;
   chrome.tabs.onCreated.addListener((tab) => {
-    if (tab.id != null && tab.openerTabId != null && tab.openerTabId === pinnedTabId) {
+    if (tab.id != null && tab.openerTabId != null && tab.openerTabId === pinnedTabId && Date.now() <= popupWatchUntil) {
       pendingNewTabId = tab.id;
     }
   });

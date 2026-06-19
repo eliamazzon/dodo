@@ -177,6 +177,11 @@ export function Settings({
           label="screenshot redaction"
           action={<Switch c={c} on={settings.screenshotRedaction} onClick={() => update({ screenshotRedaction: !settings.screenshotRedaction })}/>}
         />
+        <SettingRow c={c}
+          label="on-page cursor & action pill"
+          hint="show the gliding cursor and tool pill overlay while the agent clicks/types on the page"
+          action={<Switch c={c} on={settings.showCursorOverlay} onClick={() => update({ showCursorOverlay: !settings.showCursorOverlay })}/>}
+        />
       </Body>
     </PanelShell>
   );

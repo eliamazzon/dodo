@@ -15,6 +15,7 @@ export type Settings = {
   notifyEnabled: boolean;
   notifyDismissed: boolean;
   onboarded: boolean;
+  showCursorOverlay: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyEnabled: false,
   notifyDismissed: false,
   onboarded: false,
+  showCursorOverlay: true,
 };
 
 // Internal planner output. Not part of AgentState; lives inside plan_proposal UIMessages.

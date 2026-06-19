@@ -19,9 +19,9 @@ export type BgToPanel =
   | { kind: 'state'; state: AgentState; settings: Settings; allowlist: string[]; history: HistoryItem[] };
 
 export type ContentOp =
-  | { op: 'click'; selector: string }
-  | { op: 'type'; selector: string; text: string; perChar?: boolean } // perChar: type one char at a time with real key events (for autocomplete/combobox dropdowns)
-  | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[] } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
+  | { op: 'click'; selector: string; showOverlay?: boolean }
+  | { op: 'type'; selector: string; text: string; perChar?: boolean; showOverlay?: boolean } // perChar: type one char at a time with real key events (for autocomplete/combobox dropdowns)
+  | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[]; showOverlay?: boolean } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
   | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
   | { op: 'snapshot_structured' } // structured elements[] — kept for the disabled planner path

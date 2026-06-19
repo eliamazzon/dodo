@@ -912,9 +912,10 @@ async function handle(op: ContentOp): Promise<ContentResult> {
     if (op.op === 'click') {
       const el = resolveRef(op.selector);
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
+      const label = elementLabel(el);
       const before = interactiveElements(false);
       (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' });
-      await showCursor('click', el, elementLabel(el)); // glide the on-page cursor over, then click
+      if (op.showOverlay !== false) await showCursor('click', el, label); // glide the on-page cursor over, then click
       // Dispatch a realistic pointer+mouse sequence before click so SPAs that listen to
       // mousedown/pointerdown (Google Sheets tabs, Notion, Figma, etc.) respond correctly.
       const ct = el as HTMLElement;
@@ -927,14 +928,15 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       // the post-click snapshot, otherwise the new overlay items aren't in the DOM yet.
       await new Promise<void>((r) => setTimeout(r, 350));
       const after = interactiveElements(true);
-      return { ok: true, data: { clicked: op.selector, diff: formatDiff(before, after) } };
+      return { ok: true, data: { clicked: op.selector, label, diff: formatDiff(before, after) } };
     }
     if (op.op === 'type') {
       const el = resolveRef(op.selector) as HTMLElement | null;
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
+      const label = elementLabel(el);
       const before = interactiveElements(false);
       el.focus();
-      await showCursor('type', el, op.text ? `"${op.text.slice(0, 38)}"` : 'type');
+      if (op.showOverlay !== false) await showCursor('type', el, op.text ? `"${op.text.slice(0, 38)}"` : 'type');
       const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
       // Whether we typed character-by-character (explicit perChar, or the combobox auto-fallback below).
       let usedPerChar = false;
@@ -1006,6 +1008,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
         data: {
           typed: op.text.length,
           value: value.slice(0, 200),
+          label,
           diff,
           ...(rejected ? { note: "the field is empty after typing — it rejected the text. This is usually an inert/collapsed search or combobox: clicking or re-typing into THIS input does nothing. Instead click the adjacent TRIGGER — a nearby \"Search\" button/icon or the surrounding control, NOT this input — to open the real search panel, then type into the NEW input that appears there. Do not re-type into this same field." }
             : optionsAppeared ? { note: "a dropdown of suggestions appeared (the `+` lines in the diff). This is an autocomplete that will NOT accept an unpicked value — SELECT one now: click the matching option's data-sel ref, or press({key:\"ArrowDown\"}) then press({key:\"Enter\"})." }
@@ -1022,7 +1025,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (op.selector) target.focus();
       const meta = KEY_META[op.key];
       if (!meta) return { ok: false, error: `unsupported key "${op.key}" — use one of: ${Object.keys(KEY_META).join(', ')}` };
-      await showCursor('press', target, pressLabel(op.key, op.modifiers ?? []));
+      if (op.showOverlay !== false) await showCursor('press', target, pressLabel(op.key, op.modifiers ?? []));
       const mods = op.modifiers ?? [];
       const modInit = {
         metaKey:  mods.includes('Meta'),
