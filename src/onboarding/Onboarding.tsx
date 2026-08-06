@@ -4,6 +4,7 @@ import { Ic, Wordmark } from '../shared/icons';
 import { PanelShell, Body } from '../sidepanel/components/PanelShell';
 import { PrimaryBtn, GhostBtn } from '../sidepanel/components/atoms';
 import { GeminiProvider } from '../background/providers/gemini';
+import { pickBestModel } from '../background/providers';
 import { DEFAULT_SETTINGS, type Settings, type Mode } from '../shared/types';
 
 const DEFAULT_ALLOW = ['*.google.com', '*.github.com', '*.notion.so', '*.wikipedia.org'];
@@ -13,6 +14,8 @@ export function Onboarding() {
   const [step, setStep] = useState(1);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [allowlist, setAllowlist] = useState<string[]>(DEFAULT_ALLOW);
+  const [checkingKey, setCheckingKey] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ kind: 'get_onboarding' }).then((res) => {
@@ -28,7 +31,29 @@ export function Onboarding() {
     }}/>
   );
 
+  // Runs the key check and, on success, switches to the best model this key supports. Shared by
+  // the "continue" button (which gates progression on it) and the manual "verify key" button.
+  const runVerify = async () => {
+    if (!settings.apiKey.trim()) return false;
+    setCheckingKey(true);
+    setKeyStatus(null);
+    const r = await GeminiProvider.verifyKey(settings.apiKey);
+    setCheckingKey(false);
+    if (!r.ok) {
+      setKeyStatus({ ok: false, text: r.error ?? 'verification failed' });
+      return false;
+    }
+    const best = pickBestModel(GeminiProvider, r.supportedModels);
+    if (best !== settings.model) setSettings((s) => ({ ...s, model: best }));
+    setKeyStatus({ ok: true, text: `key verified · using ${best}` });
+    return true;
+  };
+
   const next = async () => {
+    if (step === 2) {
+      const ok = await runVerify();
+      if (!ok) return;
+    }
     if (step === 5) {
       await chrome.runtime.sendMessage({
         kind: 'save_onboarding',
@@ -64,7 +89,13 @@ export function Onboarding() {
           {step === 2 && (
             <Provider
               settings={settings}
-              onChange={(p) => setSettings({ ...settings, ...p })}
+              onChange={(p) => {
+                setSettings({ ...settings, ...p });
+                if ('apiKey' in p) setKeyStatus(null);
+              }}
+              checking={checkingKey}
+              status={keyStatus}
+              onVerify={runVerify}
             />
           )}
           {step === 3 && (
@@ -83,7 +114,12 @@ export function Onboarding() {
         }}>
           {step > 1 && <GhostBtn c={c} onClick={back}>back</GhostBtn>}
           <span style={{ flex: 1 }}/>
-          <PrimaryBtn c={c} kbd="⏎" onClick={next}>{step === 5 ? 'start' : 'continue'}</PrimaryBtn>
+          <PrimaryBtn
+            c={c}
+            kbd="⏎"
+            onClick={next}
+            disabled={(step === 2 && !settings.apiKey.trim()) || checkingKey}
+          >{checkingKey ? 'verifying…' : step === 5 ? 'start' : 'continue'}</PrimaryBtn>
         </div>
       </PanelShell>
     </div>
@@ -94,20 +130,17 @@ function Welcome() {
   const c = DODO_LIGHT;
   return (
     <div>
-      <div style={{
-        width: 56, height: 56, borderRadius: 10,
-        border: `1.5px solid ${c.accent}`,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        marginBottom: 18,
-      }}>
-        <img src={chrome.runtime.getURL('icons/spark-128.png')} alt="" width={34} height={34}/>
-      </div>
+      <img
+        src={chrome.runtime.getURL('icons/spark-128.png')} alt=""
+        width={64} height={64}
+        style={{ display: 'block', marginBottom: 18 }}
+      />
       <h2 style={{
         fontFamily: DODO_FONT, fontSize: 20, fontWeight: 600,
         margin: '0 0 10px', lineHeight: 1.3, letterSpacing: '-0.01em',
-      }}>welcome to dodo.</h2>
+      }}>welcome to dodo:</h2>
       <p style={{ fontSize: 13, color: c.muted, lineHeight: 1.6, margin: 0 }}>
-        an open-source browser agent powered by gemini. point it at a task, watch it work in your current tab, stop it anytime.
+        the fast as f*ck browser agent
       </p>
       <div style={{
         marginTop: 22, padding: '12px 14px',
@@ -122,19 +155,15 @@ function Welcome() {
 }
 
 function Provider({
-  settings, onChange,
-}: { settings: Settings; onChange: (p: Partial<Settings>) => void }) {
+  settings, onChange, checking, status, onVerify,
+}: {
+  settings: Settings;
+  onChange: (p: Partial<Settings>) => void;
+  checking: boolean;
+  status: { ok: boolean; text: string } | null;
+  onVerify: () => void;
+}) {
   const c = DODO_LIGHT;
-  const [verifying, setVerifying] = useState(false);
-  const [verifyMsg, setVerifyMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  const verify = async () => {
-    setVerifying(true);
-    setVerifyMsg(null);
-    const r = await GeminiProvider.verifyKey(settings.apiKey);
-    setVerifying(false);
-    setVerifyMsg({ ok: r.ok, text: r.ok ? 'key verified · models reachable' : r.error ?? 'verification failed' });
-  };
 
   return (
     <div>
@@ -184,16 +213,19 @@ function Provider({
           outline: 'none',
         }}
       />
+      {!settings.apiKey.trim() && (
+        <div style={{ fontSize: 11, color: c.error, marginTop: 6 }}>required to continue</div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
-        <button onClick={verify} disabled={!settings.apiKey || verifying} style={{
+        <button onClick={onVerify} disabled={!settings.apiKey || checking} style={{
           padding: '6px 12px', borderRadius: 4, border: `1px solid ${c.border}`,
           background: c.surface2, color: c.ink, fontFamily: DODO_FONT, fontSize: 11.5,
-          cursor: settings.apiKey && !verifying ? 'pointer' : 'default',
-          opacity: settings.apiKey && !verifying ? 1 : 0.5,
-        }}>{verifying ? 'verifying…' : 'verify key'}</button>
-        {verifyMsg && (
-          <span style={{ fontSize: 11, color: verifyMsg.ok ? c.success : c.error }}>
-            {verifyMsg.text}
+          cursor: settings.apiKey && !checking ? 'pointer' : 'default',
+          opacity: settings.apiKey && !checking ? 1 : 0.5,
+        }}>{checking ? 'verifying…' : 'verify key'}</button>
+        {status && (
+          <span style={{ fontSize: 11, color: status.ok ? c.success : c.error }}>
+            {status.text}
           </span>
         )}
       </div>

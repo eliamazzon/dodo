@@ -6,7 +6,7 @@ import { PanelShell, Body } from '../components/PanelShell';
 import { Switch, Toggle3 } from '../components/atoms';
 import { SettingRow } from '../cards/SettingRow';
 import type { Settings as SettingsT, Mode, ApprovalMode } from '../../shared/types';
-import { getProvider } from '../../background/providers';
+import { getProvider, pickBestModel } from '../../background/providers';
 
 export function Settings({
   c, settings, onUpdate, onClose, onTestNotify,
@@ -20,10 +20,29 @@ export function Settings({
   const [editingKey, setEditingKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState(settings.apiKey);
   const [pickingModel, setPickingModel] = useState(false);
+  const [keyChecking, setKeyChecking] = useState(false);
+  const [keyMsg, setKeyMsg] = useState<string | null>(null);
 
   const provider = getProvider(settings.providerId);
 
   const update = onUpdate;
+
+  const saveKey = async () => {
+    const newKey = keyDraft;
+    const prevModel = settings.model;
+    update({ apiKey: newKey });
+    setEditingKey(false);
+    setKeyMsg(null);
+    if (!newKey.trim()) return;
+    setKeyChecking(true);
+    const r = await provider.verifyKey(newKey);
+    setKeyChecking(false);
+    if (r.ok && r.supportedModels && !r.supportedModels.includes(prevModel)) {
+      const best = pickBestModel(provider, r.supportedModels);
+      update({ model: best });
+      setKeyMsg(`switched default model to ${best} — your key doesn't support ${prevModel}`);
+    }
+  };
 
   const maskedKey = settings.apiKey
     ? `${settings.apiKey.slice(0, 4)}${'•'.repeat(Math.max(8, settings.apiKey.length - 8))}${settings.apiKey.slice(-4)}`
@@ -108,10 +127,11 @@ export function Settings({
               }}
             />
             <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-              <button onClick={() => { update({ apiKey: keyDraft }); setEditingKey(false); }} style={{
+              <button onClick={saveKey} disabled={keyChecking} style={{
                 padding: '5px 10px', borderRadius: 4, border: 'none',
-                background: c.ink, color: c.bg, fontFamily: DODO_FONT, fontSize: 11, cursor: 'pointer', fontWeight: 600,
-              }}>save</button>
+                background: c.ink, color: c.bg, fontFamily: DODO_FONT, fontSize: 11, cursor: keyChecking ? 'default' : 'pointer', fontWeight: 600,
+                opacity: keyChecking ? 0.6 : 1,
+              }}>{keyChecking ? 'checking…' : 'save'}</button>
               <button onClick={() => { setKeyDraft(settings.apiKey); setEditingKey(false); }} style={{
                 padding: '5px 10px', borderRadius: 4, border: `1px solid ${c.border}`,
                 background: 'transparent', color: c.muted, fontFamily: DODO_FONT, fontSize: 11, cursor: 'pointer',
@@ -129,6 +149,9 @@ export function Settings({
               color: c.muted, borderRadius: 4,
             }}>edit</button>}
           />
+        )}
+        {keyMsg && (
+          <div style={{ padding: '0 16px 10px', fontSize: 11, color: c.muted, lineHeight: 1.5 }}>{keyMsg}</div>
         )}
 
         <Section c={c}>notifications</Section>

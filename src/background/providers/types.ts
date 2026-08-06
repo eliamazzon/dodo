@@ -39,6 +39,8 @@ export interface ModelProvider {
   label: string;
   defaultModel: string;
   availableModels: { id: string; label: string }[];
-  verifyKey(apiKey: string): Promise<{ ok: boolean; error?: string }>;
+  // `supportedModels` (subset of `availableModels[].id`) is populated on success — it's the
+  // catalog models this specific key can actually reach, used to steer the default model choice.
+  verifyKey(apiKey: string): Promise<{ ok: boolean; error?: string; supportedModels?: string[] }>;
   chat(req: ChatRequest): Promise<ChatResponse>;
 }

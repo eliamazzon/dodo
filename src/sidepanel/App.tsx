@@ -5,6 +5,7 @@ import { Empty } from './screens/Empty';
 import { Chat } from './screens/Chat';
 import { Settings } from './screens/Settings';
 import { History } from './screens/History';
+import { RequireApiKey } from './screens/RequireApiKey';
 import { getProvider } from '../background/providers';
 
 type View = 'agent' | 'settings' | 'history';
@@ -31,6 +32,10 @@ export function App() {
   }
 
   if (!a.hydrated) return <div style={{ width: '100%', height: '100%', background: c.bg }} />;
+
+  if (!snap.settings.apiKey) {
+    return <RequireApiKey c={c} onOpenSettings={() => setView('settings')} onOpenHistory={() => setView('history')}/>;
+  }
 
   const provider = getProvider(snap.settings.providerId);
   const common = {

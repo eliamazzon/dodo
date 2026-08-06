@@ -83,9 +83,13 @@ export const GeminiProvider: ModelProvider = {
         const body = await res.text();
         return { ok: false, error: `${res.status} ${body.slice(0, 160)}` };
       }
-      const data = (await res.json()) as { models?: unknown[] };
+      const data = (await res.json()) as { models?: { name?: string }[] };
       if (!data.models || data.models.length === 0) return { ok: false, error: 'no models returned' };
-      return { ok: true };
+      const reachable = new Set(data.models.map((m) => (m.name ?? '').replace(/^models\//, '')));
+      const supportedModels = GeminiProvider.availableModels
+        .map((m) => m.id)
+        .filter((id) => reachable.has(id));
+      return { ok: true, supportedModels };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
