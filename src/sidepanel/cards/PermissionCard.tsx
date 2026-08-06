@@ -1,18 +1,63 @@
+import { useState } from 'react';
 import type { Palette } from '../../shared/tokens';
 import { DODO_FONT } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
 import { PrimaryBtn, GhostBtn } from '../components/atoms';
+import type { PermissionScope, PermissionDuration } from '../../shared/types';
+
+// Short, readable version of the page path for display (host + truncated path, no scheme).
+function prettyPath(url: string): string {
+  try {
+    const u = new URL(url);
+    const p = u.pathname === '/' ? '' : u.pathname;
+    const s = u.host + p;
+    return s.length > 42 ? s.slice(0, 41) + '…' : s;
+  } catch {
+    return url;
+  }
+}
+
+// A domain grant is stored as a `*.example.com` wildcard (matching the format of the seeded
+// defaults), not the bare host — otherwise "whole domain" only ever matched the exact host the
+// prompt happened to fire on (e.g. granting on "amazon.com" wouldn't cover "www.amazon.com").
+function domainPatternOf(host: string): string {
+  const base = host.startsWith('www.') ? host.slice(4) : host;
+  return `*.${base}`;
+}
 
 export function PermissionCard({
-  c, host, reason, onAllow, onAllowOnce, onDeny,
+  c, host, url, pageKey, reason, onDecide, onDeny,
 }: {
   c: Palette;
   host: string;
+  url: string;
+  // Computed by the background (see PendingPermission.pageKey) so the pattern picked here matches
+  // exactly what `matchesAllowlist` checks against — no risk of the UI's derivation drifting from it.
+  pageKey: string;
   reason?: string;
-  onAllow?: () => void;
-  onAllowOnce?: () => void;
+  onDecide?: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
   onDeny?: () => void;
 }) {
+  // Default to the narrower "this page" scope; the user can widen to the whole domain deliberately.
+  const [scope, setScope] = useState<PermissionScope>('page');
+  const pattern = scope === 'page' ? pageKey : domainPatternOf(host);
+  const target = scope === 'page' ? prettyPath(url) : host;
+  const decide = (duration: PermissionDuration) => onDecide?.(pattern, scope, duration);
+
+  const tab = (s: PermissionScope, label: string) => (
+    <button
+      type="button"
+      onClick={() => setScope(s)}
+      style={{
+        flex: 1, padding: '6px 8px', borderRadius: 5, cursor: 'pointer',
+        border: `1px solid ${scope === s ? c.accent : c.border}`,
+        background: scope === s ? c.accentBg : 'transparent',
+        color: scope === s ? c.accentInk : c.muted,
+        fontFamily: DODO_FONT, fontSize: 11.5, fontWeight: 600,
+      }}
+    >{label}</button>
+  );
+
   return (
     <div style={{
       border: `1.5px solid ${c.accent}`, background: c.surface2,
@@ -30,8 +75,9 @@ export function PermissionCard({
         display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12,
         padding: '5px 10px', borderRadius: 5,
         background: c.accentBg, color: c.accentInk, fontSize: 13, fontWeight: 600,
+        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
-        <Ic.Globe size={13}/> {host}
+        <Ic.Globe size={13}/> {target}
       </div>
       {reason && (
         <div style={{
@@ -44,9 +90,17 @@ export function PermissionCard({
           {reason}
         </div>
       )}
+
+      <div style={{ fontSize: 10, color: c.subtle, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>scope</div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {tab('page', 'this page')}
+        {tab('domain', 'whole domain')}
+      </div>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <PrimaryBtn c={c} kbd="⏎" full onClick={onAllow}>allow this site</PrimaryBtn>
-        <GhostBtn c={c} full onClick={onAllowOnce}>allow once</GhostBtn>
+        <PrimaryBtn c={c} kbd="⏎" full onClick={() => decide('always')}>always allow</PrimaryBtn>
+        <GhostBtn c={c} full onClick={() => decide('session')}>allow until dodo finishes</GhostBtn>
+        <GhostBtn c={c} full onClick={() => decide('once')}>allow once</GhostBtn>
         <button onClick={onDeny} style={{
           background: 'transparent', border: 'none', color: c.muted,
           padding: '7px', fontFamily: DODO_FONT, fontSize: 12, cursor: 'pointer',

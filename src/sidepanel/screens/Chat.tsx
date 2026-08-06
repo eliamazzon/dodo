@@ -9,6 +9,8 @@ import { Markdown } from '../components/Markdown';
 import { PlanProposalCard } from '../cards/PlanProposalCard';
 import { ExecutionCard } from '../cards/ExecutionCard';
 import { PermissionCard } from '../cards/PermissionCard';
+import { CriticalConfirmCard } from '../cards/CriticalConfirmCard';
+import type { PermissionScope, PermissionDuration } from '../../shared/types';
 import { FileArtifactCard } from '../cards/FileArtifactCard';
 import { BrowserTabCard } from '../cards/BrowserTabCard';
 import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
@@ -101,7 +103,7 @@ function ToolDetailBlock({ c, label, muted, children }: {
 export function Chat({
   c, state, mode, model, providerId, availableModels, onSelectModel,
   onSendMessage, onApproveExecution, onRejectExecution,
-  onAllow, onAllowOnce, onDeny,
+  onDecide, onDeny, onConfirmCritical, onDenyCritical,
   onStop, onRetry, onChangeMode, onNewTask,
   onOpenSettings, onOpenHistory,
   showNotifyBanner, onEnableNotify, onDismissNotify,
@@ -116,9 +118,10 @@ export function Chat({
   onSendMessage: (text: string) => void;
   onApproveExecution: (messageId: string) => void;
   onRejectExecution: (messageId: string) => void;
-  onAllow: () => void;
-  onAllowOnce: () => void;
+  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
   onDeny: () => void;
+  onConfirmCritical: (messageId: string) => void;
+  onDenyCritical: (messageId: string) => void;
   onStop: () => void;
   onRetry: () => void;
   onChangeMode: (m: Mode) => void;
@@ -137,7 +140,7 @@ export function Chat({
 
   const phase = state.phase;
   const composerState: 'active' | 'working' =
-    (phase === 'working' || phase === 'awaiting_approval' || phase === 'awaiting_permission') ? 'working' : 'active';
+    (phase === 'working' || phase === 'awaiting_approval' || phase === 'awaiting_permission' || phase === 'awaiting_critical') ? 'working' : 'active';
 
   return (
     <PanelShell c={c}>
@@ -156,7 +159,7 @@ export function Chat({
         display: 'flex', flexDirection: 'column',
       }}>
         {state.messages.map((m) => renderMessage(m, {
-          c, onApproveExecution, onRejectExecution, onAllow, onAllowOnce, onDeny,
+          c, onApproveExecution, onRejectExecution, onDecide, onDeny, onConfirmCritical, onDenyCritical,
         }))}
 
         {phase === 'working' && (
@@ -167,6 +170,9 @@ export function Chat({
         )}
         {phase === 'awaiting_permission' && (
           <div style={{ fontSize: 11, color: c.muted, marginBottom: 10 }}>waiting for permission ↑</div>
+        )}
+        {phase === 'awaiting_critical' && (
+          <div style={{ fontSize: 11, color: c.warn, marginBottom: 10 }}>waiting for your confirmation ↑</div>
         )}
         {phase === 'error' && state.errorMsg && (
           <ErrorBanner c={c} message={state.errorMsg} onRetry={onRetry}/>
@@ -196,9 +202,10 @@ function renderMessage(m: UIMessage, props: {
   c: Palette;
   onApproveExecution: (id: string) => void;
   onRejectExecution: (id: string) => void;
-  onAllow: () => void;
-  onAllowOnce: () => void;
+  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
   onDeny: () => void;
+  onConfirmCritical: (id: string) => void;
+  onDenyCritical: (id: string) => void;
 }) {
   const { c } = props;
   if (m.kind === 'user') {
@@ -270,10 +277,26 @@ function renderMessage(m: UIMessage, props: {
         <PermissionCard
           c={c}
           host={m.host}
+          url={m.url}
+          pageKey={m.pageKey}
           reason={m.reason}
-          onAllow={props.onAllow}
-          onAllowOnce={props.onAllowOnce}
+          onDecide={props.onDecide}
           onDeny={props.onDeny}
+        />
+      </div>
+    );
+  }
+  if (m.kind === 'critical_confirm') {
+    return (
+      <div key={m.id}>
+        <CriticalConfirmCard
+          c={c}
+          action={m.action}
+          label={m.label}
+          reason={m.reason}
+          status={m.status}
+          onConfirm={() => props.onConfirmCritical(m.id)}
+          onDeny={() => props.onDenyCritical(m.id)}
         />
       </div>
     );

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode } from '../../shared/types';
+import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type AllowlistEntry, type PermissionScope, type PermissionDuration } from '../../shared/types';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../../shared/messages';
 
 export type AgentSnapshot = {
   state: AgentState;
   settings: Settings;
-  allowlist: string[];
+  allowlist: AllowlistEntry[];
   history: HistoryItem[];
 };
 
@@ -89,8 +89,11 @@ export function useAgent() {
     approveExecution: (messageId: string) => send({ kind: 'approve_execution', messageId }),
     rejectExecution: (messageId: string) => send({ kind: 'reject_execution', messageId }),
     stop: () => send({ kind: 'stop' }),
-    allow: (host: string, remember: boolean) => send({ kind: 'allow_host', host, remember }),
+    decidePermission: (pattern: string, scope: PermissionScope, duration: PermissionDuration) =>
+      send({ kind: 'allow_host', pattern, scope, duration }),
     deny: () => send({ kind: 'deny_permission' }),
+    confirmCritical: (messageId: string) => send({ kind: 'confirm_critical', messageId }),
+    denyCritical: (messageId: string) => send({ kind: 'deny_critical', messageId }),
     retry: () => send({ kind: 'retry' }),
     reset: () => send({ kind: 'reset' }),
     setMode: (mode: Mode) => send({ kind: 'set_mode', mode }),

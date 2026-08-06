@@ -4,6 +4,22 @@ export type Mode = 'ask' | 'auto' | 'watch';
 // Gates execute_actions. 'always_ask' surfaces an inline Approve/Reject card; 'auto_accept' runs immediately.
 export type ApprovalMode = 'always_ask' | 'auto_accept';
 
+// Granularity of a permission grant. 'domain' matches a host (with the *.example.com wildcard syntax);
+// 'page' matches one exact page (origin + pathname, query/hash stripped).
+export type PermissionScope = 'page' | 'domain';
+
+// How long a permission grant lasts. 'once' = this single action only (nothing stored); 'session' =
+// the rest of the current agent run (in-memory, cleared when control returns to the user); 'always' =
+// persisted to the allowlist forever.
+export type PermissionDuration = 'once' | 'session' | 'always';
+
+// A persisted allowlist entry. `pattern` is a host (domain scope) or a page key (page scope).
+// `user: true` marks an entry the user explicitly granted via the in-chat "always allow" prompt (as
+// opposed to a seeded default or an onboarding-selected domain). Explicit user grants are honored even
+// in 'ask' mode — "always allow" means don't ask again — whereas seeded/onboarding entries still prompt
+// in 'ask' mode.
+export type AllowlistEntry = { pattern: string; scope: PermissionScope; user?: boolean };
+
 export type Settings = {
   providerId: string;
   apiKey: string;
@@ -99,12 +115,21 @@ export type AgentPhase =
   | 'working'
   | 'awaiting_approval'
   | 'awaiting_permission'
+  | 'awaiting_critical'
   | 'complete'
   | 'error';
 
 export type PendingPermission = {
   host: string;
+  url: string;
+  // Precomputed here (background) rather than re-derived in the UI, so the page-scope grant the
+  // user picks is guaranteed to use the exact same key `matchesAllowlist` checks against.
+  pageKey: string;
   reason: string;
+};
+
+export type PendingCritical = {
+  messageId: string;
 };
 
 export type StepResult = {
@@ -160,8 +185,19 @@ export type UIMessage =
       id: string;
       kind: 'permission_request';
       host: string;
+      url: string;
+      pageKey: string;
       reason: string;
       status: 'pending' | 'allowed' | 'denied';
+      t: number;
+    }
+  | {
+      id: string;
+      kind: 'critical_confirm';
+      action: 'click' | 'type' | 'press';
+      label: string;
+      reason: string;
+      status: 'pending' | 'confirmed' | 'denied';
       t: number;
     }
   | { id: string; kind: 'error'; text: string; t: number }
@@ -172,6 +208,7 @@ export type AgentState = {
   messages: UIMessage[];
   pendingExecution?: { messageId: string };
   pendingPermission?: PendingPermission;
+  pendingCritical?: PendingCritical;
   workingLabel?: string;
   errorMsg?: string;
   startedAt?: number;

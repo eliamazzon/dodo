@@ -9,8 +9,9 @@ const MAX_RETRIES = 4;
 async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
   let lastErr: unknown = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let res: Response | undefined;
     try {
-      const res = await fetch(url, init);
+      res = await fetch(url, init);
       if (res.ok || !RETRYABLE_STATUSES.has(res.status) || attempt === MAX_RETRIES) return res;
       lastErr = res.status;
       console.warn('%c[dodo]', 'color:#6b4ea3;font-weight:600', `gemini ${res.status} — retrying (attempt ${attempt + 1}/${MAX_RETRIES})`);
@@ -19,7 +20,12 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
       if (attempt === MAX_RETRIES) throw e;
       console.warn('%c[dodo]', 'color:#6b4ea3;font-weight:600', `gemini fetch error — retrying`, e);
     }
-    const wait = Math.min(8000, 600 * 2 ** attempt) + Math.floor(Math.random() * 400);
+    // A 429's Retry-After tells us exactly how long the quota window needs — honor it over the
+    // blind exponential backoff when present (capped so a misbehaving/huge header can't stall us).
+    const retryAfterSec = Number(res?.headers.get('retry-after'));
+    const wait = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? Math.min(15000, retryAfterSec * 1000)
+      : Math.min(8000, 600 * 2 ** attempt) + Math.floor(Math.random() * 400);
     await new Promise((r) => setTimeout(r, wait));
   }
   throw new Error(`gemini retries exhausted: ${String(lastErr)}`);
@@ -72,7 +78,7 @@ export const GeminiProvider: ModelProvider = {
   async verifyKey(apiKey: string) {
     if (!apiKey || !apiKey.trim()) return { ok: false, error: 'empty api key' };
     try {
-      const res = await fetch(`${BASE}/models?key=${encodeURIComponent(apiKey)}`);
+      const res = await fetch(`${BASE}/models`, { headers: { 'x-goog-api-key': apiKey } });
       if (!res.ok) {
         const body = await res.text();
         return { ok: false, error: `${res.status} ${body.slice(0, 160)}` };
@@ -105,13 +111,13 @@ export const GeminiProvider: ModelProvider = {
       body.generationConfig = { responseMimeType: 'application/json' };
     }
 
-    const url = `${BASE}/models/${encodeURIComponent(req.model)}:generateContent?key=${encodeURIComponent(req.apiKey)}`;
+    const url = `${BASE}/models/${encodeURIComponent(req.model)}:generateContent`;
     const payload = JSON.stringify(body);
     // Ground-truth log of the exact wire body sent to Gemini (post-transform, post-prune).
     console.log('%c[dodo]', 'color:#6b4ea3;font-weight:600', `gemini ${req.model} → ${payload.length} chars`, body);
     const res = await fetchWithRetry(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': req.apiKey },
       body: payload,
     });
     if (!res.ok) {
@@ -150,7 +156,7 @@ export const GeminiProvider: ModelProvider = {
     const usage = data.usageMetadata
       ? { input: data.usageMetadata.promptTokenCount ?? 0, output: data.usageMetadata.candidatesTokenCount ?? 0 }
       : undefined;
-    if (calls.length) return { kind: 'tool_call', calls, usage };
+    if (calls.length) return { kind: 'tool_call', calls, usage, text: textOut || undefined };
     return { kind: 'text', text: textOut, usage };
   },
 };

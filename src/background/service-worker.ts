@@ -57,10 +57,16 @@ chrome.runtime.onConnect.addListener((port) => {
         await agent.stop();
         break;
       case 'allow_host':
-        await agent.allowHost(msg.host, msg.remember);
+        await agent.decidePermission(msg.pattern, msg.scope, msg.duration);
         break;
       case 'deny_permission':
         await agent.denyPermission();
+        break;
+      case 'confirm_critical':
+        await agent.confirmCritical(msg.messageId);
+        break;
+      case 'deny_critical':
+        await agent.denyCritical(msg.messageId);
         break;
       case 'retry':
         void agent.retry();
@@ -111,8 +117,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Onboarding runs in its own page (no long-lived port), so it reads/writes settings + allowlist
   // through one-shot messages — the background stays the single owner of persisted state.
   if (msg?.kind === 'get_onboarding') {
+    // Onboarding's Sites UI deals in plain host strings — flatten the (domain-scoped) entries to
+    // their patterns. save_onboarding's setAllowlist() re-wraps them as domain entries on write.
     Promise.all([getSettings(), getAllowlist()]).then(([settings, allowlist]) => {
-      sendResponse({ settings, allowlist });
+      sendResponse({ settings, allowlist: allowlist.filter((e) => e.scope === 'domain').map((e) => e.pattern) });
     });
     return true;
   }

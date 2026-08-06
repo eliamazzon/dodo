@@ -27,6 +27,10 @@ export type ChatResponse =
       kind: 'tool_call';
       calls: { name: string; args: Record<string, unknown>; id: string; thoughtSignature?: string }[];
       usage?: TokenUsage;
+      // Narration text the model returned alongside the tool calls in the same turn (e.g. Gemini
+      // often emits a short "I'll check the search results" before calling a tool). Optional —
+      // absent when the provider/turn produced no accompanying text.
+      text?: string;
     }
   | { kind: 'text'; text: string; usage?: TokenUsage };
 

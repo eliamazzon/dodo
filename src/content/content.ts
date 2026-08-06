@@ -278,7 +278,8 @@ function snapshot() {
       const placeholder = he.getAttribute('placeholder') || undefined;
       const role = he.getAttribute('role') || undefined;
       const type = he.getAttribute('type') || undefined;
-      const value = (tag === 'input' || tag === 'textarea') ? ((he as HTMLInputElement).value || undefined) : undefined;
+      const rawValue = (tag === 'input' || tag === 'textarea') ? (he as HTMLInputElement).value : '';
+      const value = rawValue ? (isSensitiveField(el) ? '•••' : rawValue) : undefined;
       const href = tag === 'a' ? (he as HTMLAnchorElement).href : undefined;
       return {
         tag,
@@ -364,7 +365,7 @@ function serializeHTML(root: Element, maxDepth: number, interactiveSet: Set<Elem
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea') {
       const v = (el as HTMLInputElement | HTMLTextAreaElement).value;
-      if (v) parts.push(`value="${escapeAttr(v.slice(0, 100))}"`);
+      if (v) parts.push(`value="${isSensitiveField(el) ? '•••' : escapeAttr(v.slice(0, 100))}"`);
     }
     if (interactiveSet.has(el)) parts.push(`data-sel="${assignRef(el)}"`);
     return parts.length ? ' ' + parts.join(' ') : '';
@@ -542,7 +543,7 @@ function extractMap(root: Element): string {
     if (type) parts.push(`type=${type}`);
     if (tag === 'input' || tag === 'textarea') {
       const v = (el as HTMLInputElement | HTMLTextAreaElement).value;
-      if (v) parts.push(`value="${v.slice(0, 60)}"`);
+      if (v) parts.push(`value="${isSensitiveField(el) ? '•••' : v.slice(0, 60)}"`);
     }
     // Rich-text editors (email/doc compose bodies, often inside an iframe) are bare contentEditable
     // <div>s with no label — flag them + their id so the model can find "the editor" and type() into it.
@@ -816,6 +817,59 @@ function elementLabel(el: Element): string {
   return raw.slice(0, 40);
 }
 
+// ── Critical-action guardrail ─────────────────────────────────────────────────────────────────
+// A local, no-LLM heuristic that flags checkout/payment-shaped actions so the background can pause
+// for an extra user confirmation before they run. Source of truth lives here (in the content script,
+// against the real DOM) so the model can't talk its way past it.
+const CHECKOUT_PHRASES = [
+  'buy now', 'place order', 'place your order', 'pay now', 'complete purchase', 'complete order',
+  'confirm purchase', 'confirm order', 'confirm and pay', 'confirm payment', 'submit payment',
+  'submit order', 'proceed to checkout', 'checkout', 'pay with', 'make payment', 'authorize payment',
+  'confirm booking', 'confirm subscription', 'start subscription', 'start membership',
+];
+// Word-boundary regexes, built once — a substring match alone could fire inside an unrelated
+// longer word; \b keeps each phrase anchored to whole-word occurrences.
+const CHECKOUT_PHRASE_RES = CHECKOUT_PHRASES.map(
+  (p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+);
+const PAYMENT_FIELD_RE = /card.?number|cardnum|cc.?num|cvv|cvc|cc.?csc|security.?code|card.?code|expir/i;
+
+// True for a password input or a payment-card field (by autocomplete token or id/name). Used to
+// redact `value` out of snapshots/extract — those go straight into the LLM request and IndexedDB
+// history, so a live password or card number must never be serialized in the clear.
+function isSensitiveField(el: Element): boolean {
+  if (el.tagName.toLowerCase() === 'input' && (el as HTMLInputElement).type === 'password') return true;
+  const ac = el.getAttribute('autocomplete')?.toLowerCase() ?? '';
+  if (ac.startsWith('cc-')) return true;
+  const idname = `${(el as HTMLElement).id} ${el.getAttribute('name') ?? ''}`;
+  return PAYMENT_FIELD_RE.test(idname);
+}
+
+// Does this element (a click target) read like a purchase/payment commit button?
+function clickIsCritical(el: Element): { reason: string } | null {
+  const label = elementLabel(el).toLowerCase();
+  if (!label) return null;
+  for (const re of CHECKOUT_PHRASE_RES) {
+    if (re.test(label)) return { reason: `this looks like a checkout/payment action ("${elementLabel(el)}")` };
+  }
+  return null;
+}
+
+// Does this type target itself look like a credit-card field? Checks only `el` — NOT the whole
+// enclosing form — so filling the name/email/address fields of a checkout form doesn't also
+// trigger a confirmation; only the actual card-number/CVV/expiry field does.
+function typeIsCritical(el: Element): { reason: string } | null {
+  const ac = el.getAttribute('autocomplete')?.toLowerCase() ?? '';
+  if (ac === 'cc-number' || ac === 'cc-csc' || ac === 'cc-exp' || ac === 'cc-exp-month' || ac === 'cc-exp-year') {
+    return { reason: 'this is a payment-card field' };
+  }
+  const idname = `${(el as HTMLElement).id} ${el.getAttribute('name') ?? ''}`;
+  if (PAYMENT_FIELD_RE.test(idname)) {
+    return { reason: 'this is a payment-card field' };
+  }
+  return null;
+}
+
 const MOD_SYM: Record<string, string> = { Meta: '⌘', Control: '⌃', Alt: '⌥', Shift: '⇧' };
 function pressLabel(key: string, mods: string[]): string {
   return mods.map((m) => MOD_SYM[m] ?? m).join('') + (key.length === 1 ? key.toUpperCase() : key);
@@ -913,6 +967,12 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       const el = resolveRef(op.selector);
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const label = elementLabel(el);
+      // Guardrail: pause checkout/payment-shaped clicks for user confirmation. Return BEFORE touching
+      // the page; the background re-issues with confirmed:true once the user approves.
+      if (!op.confirmed) {
+        const crit = clickIsCritical(el);
+        if (crit) return { ok: false, error: 'critical_action', critical: { reason: crit.reason, label } };
+      }
       const before = interactiveElements(false);
       (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center' });
       if (op.showOverlay !== false) await showCursor('click', el, label); // glide the on-page cursor over, then click
@@ -934,6 +994,11 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       const el = resolveRef(op.selector) as HTMLElement | null;
       if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
       const label = elementLabel(el);
+      // Guardrail: pause typing into a payment-card field for user confirmation (before focus/value-set).
+      if (!op.confirmed) {
+        const crit = typeIsCritical(el);
+        if (crit) return { ok: false, error: 'critical_action', critical: { reason: crit.reason, label } };
+      }
       const before = interactiveElements(false);
       el.focus();
       if (op.showOverlay !== false) await showCursor('type', el, op.text ? `"${op.text.slice(0, 38)}"` : 'type');
@@ -1021,10 +1086,17 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       if (!target) return { ok: false, error: op.selector
         ? `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates())
         : 'no element is focused — pass a selector to press a key on a specific element' };
-      const before = interactiveElements(false);
-      if (op.selector) target.focus();
       const meta = KEY_META[op.key];
       if (!meta) return { ok: false, error: `unsupported key "${op.key}" — use one of: ${Object.keys(KEY_META).join(', ')}` };
+      // Guardrail: Enter can commit/submit exactly like a click (a focused "Place order" button, or
+      // implicit form submission from inside a payment field) — check it the same way, BEFORE any
+      // side effect (focus/dispatch). Other keys (Tab/Escape/arrows/copy-paste) never submit.
+      if (op.key === 'Enter' && !op.confirmed) {
+        const crit = clickIsCritical(target) ?? typeIsCritical(target);
+        if (crit) return { ok: false, error: 'critical_action', critical: { reason: crit.reason, label: elementLabel(target) } };
+      }
+      const before = interactiveElements(false);
+      if (op.selector) target.focus();
       if (op.showOverlay !== false) await showCursor('press', target, pressLabel(op.key, op.modifiers ?? []));
       const mods = op.modifiers ?? [];
       const modInit = {
@@ -1039,6 +1111,7 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       // Synthetic keyboard events don't trigger native browser behaviors (select-all, copy, etc.).
       // For primary-modifier combos (Meta/Ctrl), invoke the real browser API first, then dispatch
       // the keyboard event so app-level listeners also fire.
+      let pasteFailed = false;
       if (mods.includes('Meta') || mods.includes('Control')) {
         if (op.key === 'a') {
           if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
@@ -1054,7 +1127,9 @@ async function handle(op: ContentOp): Promise<ContentResult> {
           // Meta+Alt+z is ⌘⌥Z (e.g. Google Sheets screen-reader mode) — not undo.
           doc.execCommand(mods.includes('Shift') ? 'redo' : 'undo');
         } else if (op.key === 'v') {
-          doc.execCommand('paste');
+          // execCommand('paste') is unreliable without clipboard permission — most browsers just
+          // no-op it. Surface that below instead of silently reporting success.
+          pasteFailed = !doc.execCommand('paste');
         }
       }
 
@@ -1075,7 +1150,13 @@ async function handle(op: ContentOp): Promise<ContentResult> {
       }
       await new Promise<void>((r) => setTimeout(r, 350));
       const after = interactiveElements(true);
-      return { ok: true, data: { pressed: op.key, diff: formatDiff(before, after) } };
+      return {
+        ok: true,
+        data: {
+          pressed: op.key, diff: formatDiff(before, after),
+          ...(pasteFailed ? { note: 'clipboard paste is unsupported in this context — the paste most likely did not happen. Use type() to insert the text directly instead.' } : {}),
+        },
+      };
     }
     if (op.op === 'extract') {
       const target = op.selector

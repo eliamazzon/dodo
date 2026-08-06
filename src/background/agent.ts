@@ -8,14 +8,15 @@
 import type {
   AgentState, Plan, HistoryItem, HistoryStatus, SavedConversationMessage, SavedConversationPart,
   ScriptStep, SnapshotElement, SnapshotResult, HtmlSnapshotResult, ScriptTarget,
-  UIMessage, ToolName, StepResult, ExecutionStatus,
+  UIMessage, ToolName, StepResult, ExecutionStatus, AllowlistEntry, PermissionScope, PermissionDuration, Mode, Settings,
 } from '../shared/types';
 import { INITIAL_AGENT_STATE } from '../shared/types';
 import type { ChatMessage, ContentPart } from './providers/types';
+import type { ContentOp } from '../shared/messages';
 import { getProvider } from './providers';
 import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab, getPinnedTabId, consumePendingNewTab, listTabs, setTabWorking, waitForTabComplete, armPopupWatch } from './tools';
-import { getSettings, upsertHistory, getHistoryItem, addAllowedHost } from './store';
-import { isHostAllowed } from './permissions';
+import { getSettings, upsertHistory, getHistoryItem, addAllowEntry, matchesAllowlist, pageKeyFromUrl } from './store';
+import { isAllowed, isUserAllowed } from './permissions';
 import { log } from './log';
 import { notify } from './notify';
 
@@ -46,6 +47,34 @@ RULES:
 - Use the datetime/location context to produce accurate results.
 - Never navigate to a host not in the allowlist without going through the navigate() tool's permission flow.
 - Google Sheets (and Google Docs/Slides) render ALL grid/document content as canvas — snapshot() and extract() show only the toolbar chrome, never cell values or document body. BEFORE doing anything else on a Google Sheets page, enable accessibility mode with press({key:"z", modifiers:["Meta","Alt"]}) (⌘⌥Z on Mac). Wait for the DOM to update, then snapshot() — cells will now render as real DOM elements you can read. Sheet tab clicks may silently fail; switch sheets via URL instead: navigate({url: "https://docs.google.com/spreadsheets/d/ID/edit?gid=SHEET_GID#gid=SHEET_GID"}) where the gid is visible in the current URL's #gid= hash.`;
+
+// The read-only tools — the only ones offered to the model in watch mode.
+const READ_ONLY_TOOLS = new Set<ToolName>(['snapshot', 'screenshot', 'extract', 'list_tabs', 'generate_file']);
+
+// Human-readable mode names, shown to the model (and user) when the permission mode changes mid-chat.
+const MODE_LABEL: Record<Mode, string> = {
+  ask: 'ask before acting',
+  auto: 'act on allowlist',
+  watch: 'watch only (read-only)',
+};
+
+// Watch-mode system prompt: the model can inspect the page and answer/extract, but has no action tools
+// at all (they're filtered out of the schema), so it physically cannot click/type/press/navigate.
+const WATCH_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser. You are currently in WATCH MODE — strictly read-only. You can inspect the active page and answer questions about it or extract data from it, but you must NOT change anything: no clicking, typing, key presses, navigation, or tab switching. Calling any of those tools will be rejected — treat this conversation as if they don't exist.
+
+Your tools:
+  • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token. snapshot() gives a full-page overview (3 levels deep); snapshot({element}) fully expands one container (dropdown, dialog, table, list) — your PRIMARY way to read deep/long content. snapshot({element, n}) expands n levels.
+  • screenshot() — capture the viewport as a JPEG (layout context).
+  • extract({selector?, mode?}) — the FALLBACK when snapshot is truncated or the DOM is empty/uninformative. mode="map" (default) flattens the page (or a scoped region) to a compact one-line-per-element list; mode="text" returns the full readable page text for prose/tables/prices.
+  • list_tabs() — list the open browser tabs (you cannot switch to them in watch mode).
+  • generate_file({filename, content}) — package extracted data into a downloadable .csv/.json/.md file for the user.
+
+The first message already includes a fresh snapshot of the current page — read it first. Use snapshot({element}) drill-in for long lists/tables before falling back to extract().
+
+RULES:
+- Answer from what's on the page. Format your answer to fit the task (list → list, yes/no → brief, table → markdown). Never compress a list into a count unless asked.
+- You are read-only. If the user asks you to DO something on the page (click, fill a form, buy, navigate, log in, send, etc.), do NOT attempt it — explain that you're in watch mode (read-only) and ask them to switch to "ask before acting" or "act on allowlist" mode in the composer, then stop.
+- Use the datetime/location context to produce accurate results.`;
 
 const PLAN_SYSTEM = `You are DODO's planner. The orchestrator agent asks you to draft a deterministic action script for a specific multi-step browser sub-task.
 
@@ -169,12 +198,20 @@ class Agent {
   private aborted = false;
   private resolvePermission: ((allowed: boolean) => void) | null = null;
   private resolveExecution: ((approved: boolean) => void) | null = null;
+  private resolveCritical: ((confirmed: boolean) => void) | null = null;
+  // In-memory permission grants that last only for the CURRENT run (cleared when control returns to
+  // the user — see complete/fail/stop/reset). Same match semantics as the persisted allowlist.
+  private sessionGrants: AllowlistEntry[] = [];
   private conversation: ChatMessage[] = [];
   // Per-turn record of the exact (post-prune) payload sent to the provider, for dodoExport.
   // The live conversation is the cumulative store; this captures what each request actually carried.
   private requestLog: { turn: number; at: string; model: string; chars: number; messages: ChatMessage[] }[] = [];
   private taskId: string | null = null;
   private firstUserText: string | null = null; // used as the history row title
+  private lastSystemPrompt: string = EXEC_SYSTEM; // the prompt the most recent run used (EXEC or WATCH) — for dodoExport
+  private lastMode: Mode | null = null; // the mode the previous message ran under — to flag mid-chat mode switches
+  private runSettings: Settings | null = null; // settings snapshot for the current run — avoids a getSettings() round-trip per tool dispatch
+  private watching = false; // true for the duration of a watch-mode run — enforced at dispatch, not just via the system prompt
 
   constructor() {
     this.ready = this.loadSavedState();
@@ -198,7 +235,7 @@ class Agent {
         const item = await getHistoryItem(this.taskId);
         if (item?.conversation) this.conversation = deserializeConversation(item.conversation);
       }
-      if (saved.phase === 'working' || saved.phase === 'awaiting_approval' || saved.phase === 'awaiting_permission') {
+      if (saved.phase === 'working' || saved.phase === 'awaiting_approval' || saved.phase === 'awaiting_permission' || saved.phase === 'awaiting_critical') {
         this.state = {
           ...saved,
           phase: 'error',
@@ -206,6 +243,7 @@ class Agent {
           workingLabel: undefined,
           pendingExecution: undefined,
           pendingPermission: undefined,
+          pendingCritical: undefined,
         };
       } else {
         this.state = saved;
@@ -284,7 +322,33 @@ class Agent {
     this.emit();
   }
 
-  private async persistSnapshot(status: HistoryStatus) {
+  // A mid-loop 'running' write racing behind a stop()/fail() write (e.g. dispatchToolCall's
+  // `finally` firing after denyPermission()'s stop() already marked the row 'stopped') would
+  // otherwise clobber the terminal status back to 'running' with no endedAt — the row then shows
+  // as running forever in History. Once the run has actually ended, 'running' writes are no-ops.
+  //
+  // Every 'running' call site is fire-and-forget (`void this.persistSnapshot('running')`), so it's
+  // safe to coalesce a burst of them (one per tool call/turn) into a single write ~400ms later
+  // instead of hitting IndexedDB on every action. Terminal statuses cancel any pending debounced
+  // write and persist immediately — completion is never lost behind a pending timer.
+  private persistDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private async persistSnapshot(status: HistoryStatus): Promise<void> {
+    if (!this.taskId || !this.firstUserText) return;
+    if (status === 'running' && (this.aborted || this.state.phase === 'complete' || this.state.phase === 'error')) return;
+    if (status === 'running') {
+      if (this.persistDebounceTimer) clearTimeout(this.persistDebounceTimer);
+      this.persistDebounceTimer = setTimeout(() => {
+        this.persistDebounceTimer = null;
+        void this.writeSnapshot('running');
+      }, 400);
+      return;
+    }
+    if (this.persistDebounceTimer) { clearTimeout(this.persistDebounceTimer); this.persistDebounceTimer = null; }
+    await this.writeSnapshot(status);
+  }
+
+  private async writeSnapshot(status: HistoryStatus): Promise<void> {
     if (!this.taskId || !this.firstUserText) return;
     const startedAt = this.state.startedAt ?? Date.now();
     const stepCount = this.state.messages.filter(
@@ -335,8 +399,15 @@ class Agent {
       this.setState({ startedAt: Date.now() });
     }
 
+    // Flag a mid-chat permission-mode switch to the MODEL ONLY (invisible to the user): if the user
+    // changed the mode since the previous message, the LLM context for this message gets a banner so
+    // the model knows the rules just changed. Skipped on the first message — no prior mode to compare.
+    const mode = (await getSettings()).defaultMode;
+    const modeChanged = this.lastMode !== null && this.lastMode !== mode;
+    this.lastMode = mode;
+
     // Build context block — page snapshot, datetime, location. Reused on first turn and follow-ups.
-    const enriched = await this.buildUserContext(text);
+    const enriched = await this.buildUserContext(text, modeChanged ? mode : undefined);
     this.conversation.push({ role: 'user', parts: [{ type: 'text', text: enriched }] });
     this.pushMessage({ id: newId('msg'), kind: 'user', text, t: Date.now() });
 
@@ -357,7 +428,7 @@ class Agent {
     await this.runLoop();
   }
 
-  private async buildUserContext(text: string): Promise<string> {
+  private async buildUserContext(text: string, switchedToMode?: Mode): Promise<string> {
     const tab = await getActiveTab().catch(() => null);
     const datetime = new Date().toISOString();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -365,17 +436,31 @@ class Agent {
 
     let pageContext = '(no snapshot available)';
     if (tab?.id != null && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-      try {
-        const snap = await runContentOp(tab.id, { op: 'snapshot' });
-        if (snap.ok && snap.data) {
-          const data = snap.data as HtmlSnapshotResult;
-          pageContext = `URL: ${data.url}\nTitle: ${data.title}\n\n${data.html}`;
-        }
-      } catch { /* best-effort */ }
+      // This context snapshot runs before any tool call, so it would otherwise bypass the
+      // allowlist/permission gate entirely — every subsequent read (snapshot/extract) IS gated
+      // (see the currentHost check in dispatchGranular), but the very first page view wasn't. Skip
+      // it for a non-allowlisted host rather than shipping its DOM to the LLM before permission has
+      // been granted; the agent will prompt for permission as soon as it needs to act on the page.
+      const host = hostFromUrl(tab.url);
+      const allowed = !host || matchesAllowlist(tab.url, host, this.sessionGrants) || await isAllowed(tab.url);
+      if (!allowed) {
+        pageContext = `(page not snapshotted — ${host} is not in the allowlist yet; permission will be requested before the agent reads or acts on it)`;
+      } else {
+        try {
+          const snap = await runContentOp(tab.id, { op: 'snapshot' });
+          if (snap.ok && snap.data) {
+            const data = snap.data as HtmlSnapshotResult;
+            pageContext = `URL: ${data.url}\nTitle: ${data.title}\n\n${data.html}`;
+          }
+        } catch { /* best-effort */ }
+      }
     }
 
     const header = this.conversation.length === 0 ? 'TASK' : 'FOLLOW-UP';
-    return `${header}: ${text}\n\nCURRENT PAGE:\n${pageContext}\n\nCONTEXT:\nDatetime: ${datetime}\nTimezone: ${timezone}${location ? `\nLocation: ${location}` : ''}`;
+    const modeBanner = switchedToMode
+      ? `[MODE CHANGED] The user just switched to "${MODE_LABEL[switchedToMode]}" mode${switchedToMode === 'watch' ? ' — you are now read-only and must not act on the page' : ''}. This applies to this and following messages.\n\n`
+      : '';
+    return `${modeBanner}${header}: ${text}\n\nCURRENT PAGE:\n${pageContext}\n\nCONTEXT:\nDatetime: ${datetime}\nTimezone: ${timezone}${location ? `\nLocation: ${location}` : ''}`;
   }
 
   async approveExecution(messageId: string) {
@@ -407,6 +492,8 @@ class Agent {
     this.aborted = true;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
+    if (this.resolveCritical) { this.resolveCritical(false); this.resolveCritical = null; }
+    this.sessionGrants = []; // run is ending — session grants don't outlive it
     const wasRunning = this.taskId
       && this.state.phase !== 'idle' && this.state.phase !== 'complete' && this.state.phase !== 'error';
     await setTabWorking(getPinnedTabId(), false); // await — see complete()
@@ -415,6 +502,7 @@ class Agent {
       workingLabel: undefined,
       pendingPermission: undefined,
       pendingExecution: undefined,
+      pendingCritical: undefined,
     });
     await this.persistActiveState();
     if (wasRunning) await this.persistSnapshot('stopped');
@@ -425,6 +513,11 @@ class Agent {
     log.info('retry');
     this.aborted = false;
     if (!this.conversation.length) return;
+    // sendMessage is the only place that raises the [MODE CHANGED] banner, but retry() can also run
+    // a turn under a mode the user switched to after the last real message. Without this, `lastMode`
+    // stays stale until the NEXT sendMessage, which then wrongly claims the mode "just changed" even
+    // though several turns already ran under it.
+    this.lastMode = (await getSettings()).defaultMode;
     // Inject a nudge so the model tries a different approach instead of repeating the same failing call.
     const last = this.conversation[this.conversation.length - 1];
     if (last.role !== 'user') {
@@ -443,8 +536,11 @@ class Agent {
     this.requestLog = [];
     this.taskId = null;
     this.firstUserText = null;
+    this.sessionGrants = [];
+    this.lastMode = null;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
+    if (this.resolveCritical) { this.resolveCritical(false); this.resolveCritical = null; }
     void setTabWorking(getPinnedTabId(), false);
     pinActiveTab(null);
     this.state = { ...INITIAL_AGENT_STATE };
@@ -462,12 +558,15 @@ class Agent {
     this.aborted = true;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
+    if (this.resolveCritical) { this.resolveCritical(false); this.resolveCritical = null; }
+    this.sessionGrants = [];
+    this.lastMode = null;
     this.taskId = item.id;
     this.firstUserText = item.title || null;
     this.conversation = deserializeConversation(item.conversation ?? []);
     let restored: AgentState = { ...item.state };
     // Phases that can't actually be resumed (the tab/permission promise is gone) — force to error.
-    if (restored.phase === 'working' || restored.phase === 'awaiting_permission' || restored.phase === 'awaiting_approval') {
+    if (restored.phase === 'working' || restored.phase === 'awaiting_permission' || restored.phase === 'awaiting_approval' || restored.phase === 'awaiting_critical') {
       restored = {
         ...restored,
         phase: 'error',
@@ -475,6 +574,7 @@ class Agent {
         workingLabel: undefined,
         pendingPermission: undefined,
         pendingExecution: undefined,
+        pendingCritical: undefined,
       };
     }
     // Tolerate old-schema entries that lack `messages`.
@@ -486,9 +586,20 @@ class Agent {
     this.emit();
   }
 
-  async allowHost(host: string, remember: boolean) {
-    if (remember && host) await addAllowedHost(host);
-    // mark pending permission UIMessage allowed
+  // Resolve a pending permission prompt with the user's chosen scope (page/domain) + duration
+  // (once/session/always). `once` grants nothing persistent; `session` lives for this run only;
+  // `always` is written to the allowlist. `pattern` is the host (domain scope) or page key (page scope).
+  async decidePermission(pattern: string, scope: PermissionScope, duration: PermissionDuration) {
+    if (duration !== 'once') {
+      // Seed sessionGrants for BOTH 'session' and 'always' so the grant takes effect for the rest of
+      // this run regardless of mode. In the default 'ask' mode, ensureAllowed consults only
+      // sessionGrants (the persisted allowlist is skipped) — so an 'always' grant that lived solely
+      // in the persisted allowlist would re-prompt on the very next action.
+      if (!this.sessionGrants.some((e) => e.pattern === pattern && e.scope === scope)) {
+        this.sessionGrants.push({ pattern, scope });
+      }
+      if (duration === 'always') await addAllowEntry(pattern, scope);
+    }
     const pending = this.state.messages.find((m) => m.kind === 'permission_request' && m.status === 'pending');
     if (pending) this.updateMessage(pending.id, { status: 'allowed' } as Partial<UIMessage>);
     if (this.resolvePermission) {
@@ -507,11 +618,65 @@ class Agent {
     await this.stop();
   }
 
-  private waitForPermission(host: string, reason: string): Promise<boolean> {
-    this.pushMessage({ id: newId('perm'), kind: 'permission_request', host, reason, status: 'pending', t: Date.now() });
-    this.setState({ phase: 'awaiting_permission', pendingPermission: { host, reason } });
+  // Gate any action on `url`: allowed if a session grant or the persisted allowlist covers it,
+  // otherwise prompt the user and wait for their decision. Returns whether the agent may proceed.
+  private async ensureAllowed(url: string, reason: string): Promise<boolean> {
+    const host = hostFromUrl(url);
+    if (!host) return true; // chrome://, about:blank, etc. — nothing to gate
+    if (matchesAllowlist(url, host, this.sessionGrants)) return true;
+    // 'ask' mode ("ask before acting" — see the Mode doc comment in shared/types.ts) does NOT consult
+    // the seeded defaults (google.com, github.com, ...) or onboarding domains — those get a fresh
+    // prompt each run. It DOES honor entries the user explicitly granted via the "always allow" prompt
+    // (isUserAllowed) — "always allow" has to mean don't-ask-again even in ask mode, or the button is
+    // meaningless. 'auto' mode honors the whole persisted allowlist. 'watch' mode never reaches here —
+    // actions are refused before dispatch (see dispatchToolCall).
+    const mode = this.runSettings?.defaultMode ?? (await getSettings()).defaultMode;
+    const allowed = mode === 'ask' ? await isUserAllowed(url) : await isAllowed(url);
+    if (allowed) return true;
+    return this.waitForPermission(url, reason);
+  }
+
+  private waitForPermission(url: string, reason: string): Promise<boolean> {
+    const host = hostFromUrl(url);
+    const pageKey = pageKeyFromUrl(url);
+    this.pushMessage({ id: newId('perm'), kind: 'permission_request', host, url, pageKey, reason, status: 'pending', t: Date.now() });
+    this.setState({ phase: 'awaiting_permission', pendingPermission: { host, url, pageKey, reason } });
     notify('dodo · needs you', `permission required for ${host}`);
     return new Promise<boolean>((resolve) => { this.resolvePermission = resolve; });
+  }
+
+  // Critical-action guardrail (checkout/payment): pause and ask the user to confirm before the
+  // content script performs a flagged click/type. Mirrors the execution-approval flow.
+  async confirmCritical(messageId: string) {
+    const pending = this.state.messages.find((m) => m.kind === 'critical_confirm' && m.id === messageId && m.status === 'pending');
+    if (this.state.phase !== 'awaiting_critical' || this.state.pendingCritical?.messageId !== messageId || !pending) {
+      log.warn('confirmCritical ignored — no matching pending critical action');
+      return;
+    }
+    this.updateMessage(messageId, { status: 'confirmed' } as Partial<UIMessage>);
+    this.setState({ phase: 'working', pendingCritical: undefined, workingLabel: 'thinking' });
+    this.resolveCritical?.(true);
+    this.resolveCritical = null;
+  }
+
+  async denyCritical(messageId: string) {
+    const pending = this.state.messages.find((m) => m.kind === 'critical_confirm' && m.id === messageId && m.status === 'pending');
+    if (this.state.phase !== 'awaiting_critical' || this.state.pendingCritical?.messageId !== messageId || !pending) {
+      log.warn('denyCritical ignored — no matching pending critical action');
+      return;
+    }
+    this.updateMessage(messageId, { status: 'denied' } as Partial<UIMessage>);
+    this.setState({ phase: 'working', pendingCritical: undefined, workingLabel: 'thinking' });
+    this.resolveCritical?.(false);
+    this.resolveCritical = null;
+  }
+
+  private waitForCriticalConfirmation(action: 'click' | 'type' | 'press', label: string, reason: string): Promise<boolean> {
+    const messageId = newId('crit');
+    this.pushMessage({ id: messageId, kind: 'critical_confirm', action, label, reason, status: 'pending', t: Date.now() });
+    this.setState({ phase: 'awaiting_critical', pendingCritical: { messageId }, workingLabel: 'awaiting confirmation' });
+    notify('dodo · needs you', `confirm before ${action} — ${reason}`);
+    return new Promise<boolean>((resolve) => { this.resolveCritical = resolve; });
   }
 
   private waitForExecutionApproval(messageId: string): Promise<boolean> {
@@ -522,8 +687,18 @@ class Agent {
 
   private async runLoop() {
     const settings = await getSettings();
+    this.runSettings = settings; // cached for the duration of this run — see dispatchGranular
     const provider = getProvider(settings.providerId);
     if (!settings.apiKey) return this.fail('no api key configured — open settings to add your api key');
+
+    // Watch mode: a read-only system prompt tells the model it can only inspect/answer, and
+    // dispatchToolCall refuses any non-read-only tool at the dispatch boundary (see `this.watching`).
+    // The tool SCHEMA itself is always the full set, regardless of mode — a conversation that
+    // switches modes mid-chat would otherwise carry history containing function calls for tools no
+    // longer declared in the current request, which providers may reject or mishandle.
+    this.watching = settings.defaultMode === 'watch';
+    const systemPrompt = this.watching ? WATCH_SYSTEM : EXEC_SYSTEM;
+    this.lastSystemPrompt = systemPrompt;
 
     let emptyTurns = 0;
     let tokensIn = 0;
@@ -533,7 +708,7 @@ class Agent {
     for (let turn = 0; turn < 200 && !this.aborted; turn++) {
       this.setState({ workingLabel: 'thinking' });
       const sentMessages = pruneStaleToolResults(this.conversation);
-      const chars = logChatRequest(turn, settings.model, sentMessages);
+      const chars = logChatRequest(turn, settings.model, sentMessages, systemPrompt);
       this.requestLog.push({ turn, at: new Date().toISOString(), model: settings.model, chars, messages: sentMessages });
       if (this.requestLog.length > 100) this.requestLog.shift();
       let res;
@@ -541,7 +716,7 @@ class Agent {
         res = await provider.chat({
           apiKey: settings.apiKey,
           model: settings.model,
-          systemPrompt: EXEC_SYSTEM,
+          systemPrompt,
           messages: sentMessages,
           tools: TOOL_SCHEMAS,
         });
@@ -579,10 +754,16 @@ class Agent {
 
       log.info(`turn ${turn} ← tool_calls`, res.calls.map((c) => `${c.name}(${JSON.stringify(c.args).slice(0, 80)})`));
 
+      // A model can return narration alongside its tool calls in the same turn (Gemini often does —
+      // "I'll check the search results…" before calling a tool). Previously this text was silently
+      // dropped: neither shown to the user nor kept in the conversation the model sees on later turns.
+      const narration = res.text?.trim();
+      const assistantParts: ContentPart[] = narration ? [{ type: 'text', text: res.text! }] : [];
+      if (narration) this.pushMessage({ id: newId('msg'), kind: 'assistant', text: narration, t: Date.now() });
       // Add the model's tool_call message to the conversation first.
-      const assistantParts: ContentPart[] = res.calls.map((c) => ({
-        type: 'tool_call', id: c.id, name: c.name, args: c.args, thoughtSignature: c.thoughtSignature,
-      }));
+      assistantParts.push(...res.calls.map((c): ContentPart => (
+        { type: 'tool_call', id: c.id, name: c.name, args: c.args, thoughtSignature: c.thoughtSignature }
+      )));
       this.conversation.push({ role: 'assistant', parts: assistantParts });
 
       const toolReplies: ContentPart[] = [];
@@ -634,6 +815,20 @@ class Agent {
     callId: string,
     args: Record<string, unknown>,
   ): Promise<{ result: unknown; isError: boolean; screenshotBase64?: string }> {
+    // Enforced here rather than only via schema filtering: the request always declares the FULL tool
+    // schema now (see runLoop), so a watch-mode model can still technically attempt a mutating call —
+    // this is the hard boundary that actually stops it from touching the page.
+    if (this.watching && !READ_ONLY_TOOLS.has(name)) {
+      const activityId = newId('act');
+      this.pushMessage({
+        id: activityId, kind: 'tool_activity', name, args, callId,
+        status: 'error', t: Date.now(), detail: 'blocked — watch mode is read-only',
+      });
+      return {
+        result: 'blocked: you are in watch mode (strictly read-only) — this tool cannot be used right now. Tell the user you are read-only and ask them to switch to "ask before acting" or "act on allowlist" mode to perform actions, then stop.',
+        isError: true,
+      };
+    }
     // generate_file creates a file_artifact UIMessage; no tool_activity row.
     if (name === 'generate_file') {
       const filename = String(args.filename ?? 'file.txt');
@@ -679,6 +874,11 @@ class Agent {
         // already failed via denyPermission path; return early
         return { result: msg, isError: true };
       }
+      if (msg === 'critical_action_denied') {
+        // User declined the critical-action confirmation. The run is NOT aborted — tell the model so
+        // it can stop and report back rather than retrying the same blocked action.
+        return { result: 'The user declined to confirm this action (it was flagged as a sensitive checkout/payment step). Do not retry it — stop and let the user know you held off.', isError: true };
+      }
       return { result: msg, isError: true };
     } finally {
       void this.persistSnapshot('running');
@@ -706,15 +906,22 @@ class Agent {
 
     const tab = await getActiveTab();
     if (!tab || tab.id == null) throw new Error('no active tab');
+    // Keep the pin and the side-panel indicator in sync with the tab we actually resolved.
+    // getActiveTab falls back to the focused active tab when the pinned tab was closed/discarded (or
+    // onRemoved cleared the pin); without re-pinning here the indicator (driven by pinnedTabId) would
+    // stay stuck on the dead tab while the agent keeps acting on the real one. This only fires in that
+    // genuine fallback case — a live pin is always preferred — so it doesn't chase user tab switches.
+    if (tab.id !== getPinnedTabId()) {
+      pinActiveTab(tab.id);
+      await setTabWorking(tab.id, true);
+      await this.refreshActiveTab();
+    }
 
     if (name === 'navigate') {
       const url = String(args.url ?? '');
       const host = hostFromUrl(url);
       if (!host) throw new Error('invalid url');
-      if (!await isHostAllowed(host)) {
-        const ok = await this.waitForPermission(host, `agent wants to navigate to ${host}`);
-        if (!ok) throw new Error('permission_denied');
-      }
+      if (!await this.ensureAllowed(url, `agent wants to navigate to ${host}`)) throw new Error('permission_denied');
       await navigateTab(tab.id, url);
       // SPAs fire status:complete on HTML load, not after JS renders content
       await new Promise<void>((r) => setTimeout(r, 1500));
@@ -725,9 +932,8 @@ class Agent {
     }
 
     const currentHost = tab.url ? hostFromUrl(tab.url) : '';
-    if (currentHost && !await isHostAllowed(currentHost)) {
-      const ok = await this.waitForPermission(currentHost, `agent wants to act on ${currentHost}`);
-      if (!ok) throw new Error('permission_denied');
+    if (currentHost && !await this.ensureAllowed(tab.url ?? '', `agent wants to act on ${currentHost}`)) {
+      throw new Error('permission_denied');
     }
 
     if (name === 'screenshot') {
@@ -748,30 +954,27 @@ class Agent {
     }
     if (name === 'click') {
       armPopupWatch();
-      const showOverlay = (await getSettings()).showCursorOverlay;
-      const r = await runContentOp(tab.id, { op: 'click', selector: String(args.selector ?? ''), showOverlay });
-      if (!r.ok) throw new Error(r.error);
-      return this.maybeFollowNewTab(r.data);
+      const showOverlay = this.runSettings?.showCursorOverlay ?? (await getSettings()).showCursorOverlay;
+      const r = await this.runGuardedOp(tab.id, 'click', { op: 'click', selector: String(args.selector ?? ''), showOverlay });
+      return this.maybeFollowNewTab(r);
     }
     if (name === 'type') {
       armPopupWatch();
-      const showOverlay = (await getSettings()).showCursorOverlay;
-      const r = await runContentOp(tab.id, { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? ''), perChar: Boolean(args.perChar), showOverlay });
-      if (!r.ok) throw new Error(r.error);
-      return this.maybeFollowNewTab(r.data);
+      const showOverlay = this.runSettings?.showCursorOverlay ?? (await getSettings()).showCursorOverlay;
+      const r = await this.runGuardedOp(tab.id, 'type', { op: 'type', selector: String(args.selector ?? ''), text: String(args.text ?? ''), perChar: Boolean(args.perChar), showOverlay });
+      return this.maybeFollowNewTab(r);
     }
     if (name === 'press') {
       armPopupWatch();
-      const showOverlay = (await getSettings()).showCursorOverlay;
-      const r = await runContentOp(tab.id, {
+      const showOverlay = this.runSettings?.showCursorOverlay ?? (await getSettings()).showCursorOverlay;
+      const r = await this.runGuardedOp(tab.id, 'press', {
         op: 'press',
         key: String(args.key ?? ''),
         selector: args.selector ? String(args.selector) : undefined,
         modifiers: Array.isArray(args.modifiers) ? args.modifiers : undefined,
         showOverlay,
       });
-      if (!r.ok) throw new Error(r.error);
-      return this.maybeFollowNewTab(r.data);
+      return this.maybeFollowNewTab(r);
     }
     if (name === 'extract') {
       const r = await runContentOp(tab.id, {
@@ -783,6 +986,27 @@ class Agent {
       return r.data;
     }
     throw new Error(`unknown granular tool: ${name}`);
+  }
+
+  // Run a click/type/press content op behind the critical-action guardrail: if the content script
+  // flags it (checkout/payment-shaped — including press("Enter") on such a target/field), pause for
+  // the user to confirm, then re-issue the op with confirmed:true.
+  // Throws 'critical_action_denied' if the user cancels, or the op's error on any other failure.
+  private async runGuardedOp(
+    tabId: number,
+    action: 'click' | 'type' | 'press',
+    op: Extract<ContentOp, { op: 'click' | 'type' | 'press' }>,
+  ): Promise<unknown> {
+    let r = await runContentOp(tabId, op);
+    if (!r.ok && r.critical) {
+      const approved = await this.waitForCriticalConfirmation(action, r.critical.label, r.critical.reason);
+      if (!approved) throw new Error('critical_action_denied');
+      if (this.aborted) throw new Error('aborted');
+      armPopupWatch();
+      r = await runContentOp(tabId, { ...op, confirmed: true });
+    }
+    if (!r.ok) throw new Error(r.error);
+    return r.data;
   }
 
   // If the action just opened a new tab, make it the active tab and tell the model about it.
@@ -930,10 +1154,7 @@ class Agent {
         if (step.action === 'navigate') {
           const host = hostFromUrl(step.url);
           if (!host) throw new Error('invalid url');
-          if (!await isHostAllowed(host)) {
-            const ok = await this.waitForPermission(host, `agent wants to navigate to ${host}`);
-            if (!ok) throw new Error('permission_denied');
-          }
+          if (!await this.ensureAllowed(step.url, `agent wants to navigate to ${host}`)) throw new Error('permission_denied');
           const tab = await getActiveTab();
           if (!tab?.id) throw new Error('no active tab');
           await navigateTab(tab.id, step.url);
@@ -976,6 +1197,13 @@ class Agent {
             : await runContentOp(tab.id, { op: 'click', selector });
 
           if (!op.ok) {
+            // A checkout/payment-shaped step the guardrail flagged — this scripted-execution path has
+            // no confirmation UI wired up (it's disabled today; see PLANNER_TOOL_SCHEMAS), so treat it
+            // as a hard stop rather than letting recovery retry/rewrite around the block.
+            if (op.critical) {
+              results.push({ action: step.action, status: 'error', error: `blocked: ${op.critical.reason} — sensitive actions require the granular tools' confirmation flow, not a script.` });
+              return { results, extracted: extractParts.join('\n\n'), ok: false };
+            }
             if (++recoveryAttempts > 3) {
               results.push({ action: step.action, status: 'error', error: op.error ?? 'action failed' });
               return { results, extracted: extractParts.join('\n\n'), ok: false };
@@ -1119,7 +1347,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
       taskId: this.taskId,
       title: this.firstUserText,
       phase: this.state.phase,
-      systemPrompt: EXEC_SYSTEM,
+      systemPrompt: this.lastSystemPrompt,
       tools: TOOL_SCHEMAS,
       messages,
       requests,
@@ -1128,6 +1356,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
 
   private async complete() {
     log.info('complete');
+    this.sessionGrants = []; // run ended — session grants don't carry into the next message
     // Await so the MV3 service worker stays alive until the content script has cleared the working
     // indicator + faded the on-page cursor overlay; a fire-and-forget `void` here can be dropped if
     // the worker suspends right after the run ends (the overlay would then never hide).
@@ -1141,6 +1370,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
 
   private async fail(msg: string) {
     log.err('fail', msg);
+    this.sessionGrants = []; // run ended — session grants don't carry into the next message
     await setTabWorking(getPinnedTabId(), false); // await — see complete()
     // Render the error solely through the phase:'error' ErrorBanner ("halted" + retry) in Chat.tsx.
     // Don't also pushMessage a kind:'error' entry — that produced a duplicate red box above the banner.
@@ -1226,10 +1456,16 @@ const LIVE_PAGE_RESULTS = 2;
 const SUPERSEDED_STUB =
   '[superseded snapshot — the page has since changed; call snapshot()/extract() again for the current DOM and fresh refs]';
 
+// Screenshots are the same story but worse: each is ~100-300KB of base64 JPEG, and unlike
+// snapshot/extract they were never being pruned at all — a screenshot-heavy task re-sends every
+// prior screenshot on every subsequent turn, forever. Keep only the most recent one live.
+const LIVE_IMAGES = 1;
+const STALE_IMAGE_STUB = '[stale screenshot omitted — call screenshot() again if you need the current view]';
+
 // Log exactly what's being sent to the provider each turn: a collapsed group with one line per
 // message (role · part kinds · sizes · previews) plus the raw payload object for expansion in
 // the service-worker devtools console. `messages` here is the post-prune payload, not the store.
-function logChatRequest(turn: number, model: string, messages: ChatMessage[]): number {
+function logChatRequest(turn: number, model: string, messages: ChatMessage[], systemPrompt: string): number {
   const preview = (s: string, n = 80) => s.replace(/\s+/g, ' ').trim().slice(0, n);
   const size = (v: unknown) => (typeof v === 'string' ? v.length : JSON.stringify(v ?? '').length);
   let totalChars = 0;
@@ -1246,14 +1482,15 @@ function logChatRequest(turn: number, model: string, messages: ChatMessage[]): n
   });
   log.group(`turn ${turn} → chat · ${model} · ${messages.length} msgs · ~${totalChars} chars`);
   for (const l of lines) log.info(l);
-  log.info('payload', { systemPrompt: EXEC_SYSTEM, messages });
+  log.info('payload', { systemPrompt, messages });
   log.groupEnd();
   return totalChars;
 }
 
 function pruneStaleToolResults(messages: ChatMessage[]): ChatMessage[] {
-  let kept = 0;
-  // Walk newest→oldest so the most recent snapshot/extract results stay intact.
+  let keptResults = 0;
+  let keptImages = 0;
+  // Walk newest→oldest so the most recent snapshot/extract results and screenshots stay intact.
   const pruned = messages
     .slice()
     .reverse()
@@ -1261,12 +1498,20 @@ function pruneStaleToolResults(messages: ChatMessage[]): ChatMessage[] {
       let changed = false;
       const parts = m.parts.map((p) => {
         if (p.type === 'tool_result' && !p.isError && (p.name === 'snapshot' || p.name === 'extract')) {
-          if (kept < LIVE_PAGE_RESULTS) {
-            kept++;
+          if (keptResults < LIVE_PAGE_RESULTS) {
+            keptResults++;
             return p;
           }
           changed = true;
           return { ...p, result: SUPERSEDED_STUB };
+        }
+        if (p.type === 'image') {
+          if (keptImages < LIVE_IMAGES) {
+            keptImages++;
+            return p;
+          }
+          changed = true;
+          return { type: 'text', text: STALE_IMAGE_STUB } satisfies ContentPart;
         }
         return p;
       });

@@ -52,7 +52,6 @@ export function App() {
     return <Empty c={c} {...common} onSubmit={a.sendMessage}/>;
   }
 
-  const pending = snap.state.pendingPermission;
   const showNotifyBanner = !snap.settings.notifyEnabled && !snap.settings.notifyDismissed;
 
   return (
@@ -67,9 +66,10 @@ export function App() {
       onSendMessage={a.sendMessage}
       onApproveExecution={a.approveExecution}
       onRejectExecution={a.rejectExecution}
-      onAllow={() => pending && a.allow(pending.host, true)}
-      onAllowOnce={() => pending && a.allow(pending.host, false)}
+      onDecide={a.decidePermission}
       onDeny={a.deny}
+      onConfirmCritical={a.confirmCritical}
+      onDenyCritical={a.denyCritical}
       onStop={a.stop}
       onRetry={a.retry}
       onChangeMode={a.setMode}

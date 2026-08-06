@@ -4,5 +4,6 @@ dist/
 .ignore/
 console-*.log
 export_*
+export*.js
 todo
 *.zip
