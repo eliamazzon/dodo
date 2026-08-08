@@ -4,7 +4,7 @@
 
 # DODO
 
-**A browser agent that lives in your Chrome side panel — tell it what to do in plain English, and it clicks, types, and reads pages for you.**
+**The fast as fuck browser agent.** Lives in your Chrome side panel, drives the page with the fewest LLM calls and the fewest tokens it can get away with — diffs instead of full-page dumps, short refs instead of verbose selectors, one orchestrator loop instead of a planner-then-executor round-trip. Tell it what to do in plain English; it gets there fast.
 
 Open source · bring your own [Gemini](https://aistudio.google.com/apikey) key · your data stays on your machine.
 
@@ -18,13 +18,13 @@ Open source · bring your own [Gemini](https://aistudio.google.com/apikey) key �
 
 ## ✦ Quickstart
 
-One command — clones, builds, and walks you through loading DODO into the browser and profile you choose:
+One command — clones, builds, and walks you through loading DODO into your browser:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/eliamazzon/dodo/main/install.sh | sh
 ```
 
-It detects your installed Chromium browsers (Chrome, Brave, Edge, Chromium), lets you pick a browser and profile, opens that exact profile at `chrome://extensions`, and copies the build path to your clipboard. Then you click **Load unpacked** and paste — the one step Chrome requires you to do by hand for unpacked extensions.
+It copies `chrome://extensions` to your clipboard, then swaps in the build path once you're at the file picker. Then you click **Load unpacked** and paste — the one step Chrome requires you to do by hand for unpacked extensions.
 
 First load opens an onboarding tab: paste your Gemini API key (get one at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), set your site allowlist, and you're done. Open DODO any time with **`Alt+L`** or the toolbar icon.
 
@@ -34,7 +34,7 @@ First load opens an onboarding tab: paste your Gemini API key (get one at [aistu
 ```sh
 npm install
 npm run build
-npm run setup        # the same guided picker (build + open + clipboard)
+npm run setup        # the same guided walkthrough (build + clipboard)
 ```
 
 Or fully by hand:
@@ -44,6 +44,36 @@ Or fully by hand:
 3. Onboarding opens automatically; add your Gemini key and allowlist.
 
 </details>
+
+## ✦ Updating
+
+DODO installs unpacked from a git checkout, so Chrome's built-in auto-update doesn't apply — and MV3 forbids an extension from loading new code at runtime. Instead, DODO watches the repo and tells you when there's something to pick up.
+
+Every few hours the background worker asks GitHub whether commits have landed on `main` since the commit your copy was built from. If any have, the side panel shows an **update available** banner listing what changed. Two clicks from there:
+
+1. **copy update command** — puts `cd <your checkout> && npm run update` on your clipboard. Run it: it pulls, reinstalls dependencies if the lockfile moved, and rebuilds `dist/`.
+2. **reload DODO** — reloads the extension so Chrome re-reads `dist/` from disk. (Same as hitting Reload on `chrome://extensions`.)
+
+The banner clears itself afterwards: the rebuilt copy carries the new commit, so the next check comes back clean.
+
+You can run the update by hand at any time:
+
+```sh
+npm run update
+```
+
+It refuses to run on a dirty working tree rather than clobbering local changes, and tells you which files are in the way.
+
+**What's actually sent:** a single unauthenticated GET to `api.github.com` comparing two commit SHAs. No identifiers, no telemetry, and nothing is ever downloaded or executed on its own — the banner only ever *tells you* to run a command. Turn the checks off entirely in **Settings → updates → check for updates**; the same section shows the version and commit your copy was built from.
+
+## Why it's fast
+
+Every design decision trades toward fewer round-trips to the model and fewer tokens per round-trip:
+
+- **Diffs, not page dumps** — `click()` and `type()` return what changed, not the whole DOM. The model doesn't need to re-snapshot after every step just to see the result of its own action.
+- **Short refs, not CSS selectors** — `snapshot()` tags interactive elements with a compact ref (`data-sel="e42"`); the model passes that back instead of generating and re-parsing verbose selectors, shrinking both the input and output side of every call.
+- **Drill-down, not re-fetch** — `snapshot({element})` expands just the one container you actually need — a dropdown, a table, a dialog — instead of pulling the entire page again.
+- **One loop, no ceremony** — a single orchestrator drives the whole task end to end. No separate planning call, no forced summary step between actions — just the next action, as soon as the model knows what it is.
 
 ## What it does
 
@@ -80,7 +110,8 @@ The agent can call: `snapshot`, `screenshot`, `navigate`, `click`, `type`, `pres
 
 - Your **API key is stored locally** and is sent only to Google's Gemini endpoint when the agent runs.
 - Page content the agent reads (snapshots, extracted text, screenshots) is sent to Gemini as context for your task — same as any LLM call.
-- DODO fetches your **approximate location** (city/country) from [`ipapi.co`](https://ipapi.co) at the start of a run so the model has accurate date/place context; this sends your IP to that service. It's the only third-party call besides Gemini.
+- DODO fetches your **approximate location** (city/country) from [`ipapi.co`](https://ipapi.co) at the start of a run so the model has accurate date/place context; this sends your IP to that service.
+- DODO asks **`api.github.com`** every few hours whether this repo has new commits, so it can tell you an update is available. Public, unauthenticated, no identifiers — just two commit SHAs. Disable it in **Settings → updates**. See [Updating](#-updating).
 - **No telemetry.** Nothing is reported to the project's authors.
 
 ## Develop
@@ -100,8 +131,10 @@ npm run typecheck
 
 ## Star History
 
-<div align="center">
-<a href="https://star-history.com/#eliamazzon/dodo&Date">
-  <img src="https://api.star-history.com/svg?repos=eliamazzon/dodo&type=Date" alt="DODO Star History Chart" width="600" />
+<a href="https://www.star-history.com/?type=date&repos=eliamazzon%2Fdodo">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=eliamazzon/dodo&type=date&theme=dark&legend=top-left&sealed_token=VWoGvQZc6Hn6413YZ590gubh7Ygy3dRLtkuL-t3m5wMxmwnvF9GHTv3Pr4WqjKE8KtPqxVU6HR5fjWoa73XWBYCD_afTQJ2Gt8gnYQFdHKqrQdNe2uP46AOh_r4VVk483Bd_nYAzjCFRQsF5" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=eliamazzon/dodo&type=date&legend=top-left&sealed_token=VWoGvQZc6Hn6413YZ590gubh7Ygy3dRLtkuL-t3m5wMxmwnvF9GHTv3Pr4WqjKE8KtPqxVU6HR5fjWoa73XWBYCD_afTQJ2Gt8gnYQFdHKqrQdNe2uP46AOh_r4VVk483Bd_nYAzjCFRQsF5" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=eliamazzon/dodo&type=date&legend=top-left&sealed_token=VWoGvQZc6Hn6413YZ590gubh7Ygy3dRLtkuL-t3m5wMxmwnvF9GHTv3Pr4WqjKE8KtPqxVU6HR5fjWoa73XWBYCD_afTQJ2Gt8gnYQFdHKqrQdNe2uP46AOh_r4VVk483Bd_nYAzjCFRQsF5" />
+ </picture>
 </a>
-</div>
