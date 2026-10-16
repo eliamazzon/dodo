@@ -71,6 +71,7 @@ export function PanelHeader({
             background: c.surface, border: `1px solid ${c.border}`, borderRadius: 6,
             boxShadow: `0 6px 24px rgba(0,0,0,0.08)`,
             padding: 4, minWidth: 200, zIndex: 10,
+            maxHeight: 320, overflowY: 'auto',
           }}>
             {availableModels!.map((m) => {
               const active = m.id === model;

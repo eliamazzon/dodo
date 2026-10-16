@@ -7,15 +7,21 @@ import { Switch, Toggle3 } from '../components/atoms';
 import { SettingRow } from '../cards/SettingRow';
 import type { Settings as SettingsT, Mode, ApprovalMode } from '../../shared/types';
 import { getProvider, pickBestModel } from '../../background/providers';
+import type { ModelOption } from '../components/PanelHeader';
 
 export function Settings({
   c, settings, onUpdate, onClose, onTestNotify,
+  models, modelsLoading, modelsError, onRefreshModels,
 }: {
   c: Palette;
   settings: SettingsT;
   onUpdate: (patch: Partial<SettingsT>) => void;
   onClose: () => void;
   onTestNotify: () => void;
+  models: ModelOption[];
+  modelsLoading: boolean;
+  modelsError: string | null;
+  onRefreshModels: () => void;
 }) {
   const [editingKey, setEditingKey] = useState(false);
   const [keyDraft, setKeyDraft] = useState(settings.apiKey);
@@ -71,8 +77,19 @@ export function Settings({
         />
         {pickingModel ? (
           <div style={{ padding: '12px 16px', borderBottom: `1px solid ${c.border}` }}>
-            <div style={{ fontSize: 12.5, color: c.ink, marginBottom: 8 }}>default model</div>
-            {provider.availableModels.map((m) => (
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ flex: 1, fontSize: 12.5, color: c.ink }}>default model</span>
+              <span
+                onClick={modelsLoading ? undefined : onRefreshModels}
+                style={{ fontSize: 11, color: c.muted, cursor: modelsLoading ? 'default' : 'pointer' }}
+              >{modelsLoading ? 'fetching models…' : 'refresh list'}</span>
+            </div>
+            {modelsError && (
+              <div style={{ fontSize: 11, color: c.muted, marginBottom: 8 }}>
+                couldn't fetch models from your key, showing the built-in list · {modelsError}
+              </div>
+            )}
+            {models.map((m) => (
               <div
                 key={m.id}
                 onClick={() => { update({ model: m.id }); setPickingModel(false); }}

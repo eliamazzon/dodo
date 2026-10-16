@@ -6,7 +6,7 @@ import { Chat } from './screens/Chat';
 import { Settings } from './screens/Settings';
 import { History } from './screens/History';
 import { RequireApiKey } from './screens/RequireApiKey';
-import { getProvider } from '../background/providers';
+import { useModels, withCurrent } from './hooks/useModels';
 
 type View = 'agent' | 'settings' | 'history';
 
@@ -15,9 +15,16 @@ export function App() {
   const [view, setView] = useState<View>('agent');
   const a = useAgent();
   const { snap } = a;
+  const m = useModels(snap.settings.providerId, snap.settings.apiKey);
+  const models = withCurrent(m.models, snap.settings.model);
 
   if (view === 'settings') {
-    return <Settings c={c} settings={snap.settings} onUpdate={a.setSettings} onClose={() => setView('agent')} onTestNotify={a.testNotify}/>;
+    return (
+      <Settings
+        c={c} settings={snap.settings} onUpdate={a.setSettings} onClose={() => setView('agent')} onTestNotify={a.testNotify}
+        models={models} modelsLoading={m.loading} modelsError={m.error} onRefreshModels={m.refresh}
+      />
+    );
   }
   if (view === 'history') {
     return (
@@ -37,12 +44,11 @@ export function App() {
     return <RequireApiKey c={c} onOpenSettings={() => setView('settings')} onOpenHistory={() => setView('history')}/>;
   }
 
-  const provider = getProvider(snap.settings.providerId);
   const common = {
     model: snap.settings.model,
     mode: snap.settings.defaultMode,
     providerId: snap.settings.providerId,
-    availableModels: provider.availableModels,
+    availableModels: models,
     onSelectModel: (id: string) => { a.setSettings({ model: id }); },
     onChangeMode: a.setMode,
     onNewTask: a.reset,

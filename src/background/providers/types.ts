@@ -42,5 +42,8 @@ export interface ModelProvider {
   // `supportedModels` (subset of `availableModels[].id`) is populated on success — it's the
   // catalog models this specific key can actually reach, used to steer the default model choice.
   verifyKey(apiKey: string): Promise<{ ok: boolean; error?: string; supportedModels?: string[] }>;
+  // Every chat-capable model this key can reach, live from the provider's API. Catalog models come
+  // first (in `availableModels` order, with their curated labels), then the rest. Throws on failure.
+  listModels(apiKey: string): Promise<{ id: string; label: string }[]>;
   chat(req: ChatRequest): Promise<ChatResponse>;
 }

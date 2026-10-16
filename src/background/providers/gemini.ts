@@ -64,6 +64,40 @@ function toGeminiContents(messages: ChatMessage[]): GeminiContent[] {
   return out;
 }
 
+type GeminiModel = { name?: string; supportedGenerationMethods?: string[] };
+
+// models.list is paginated (default page size 50), so a single request can silently miss models.
+// Follow nextPageToken until it runs out.
+async function fetchAllModels(apiKey: string): Promise<GeminiModel[]> {
+  const all: GeminiModel[] = [];
+  let pageToken = '';
+  do {
+    const qs = new URLSearchParams({ pageSize: '1000' });
+    if (pageToken) qs.set('pageToken', pageToken);
+    const res = await fetch(`${BASE}/models?${qs}`, { headers: { 'x-goog-api-key': apiKey } });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`${res.status} ${body.slice(0, 160)}`);
+    }
+    const data = (await res.json()) as { models?: GeminiModel[]; nextPageToken?: string };
+    all.push(...(data.models ?? []));
+    pageToken = data.nextPageToken ?? '';
+  } while (pageToken);
+  return all;
+}
+
+// The agent needs plain text-in/text-out with function calling. These families also answer
+// generateContent but can't drive it (speech, image generation, live/audio, embeddings, etc.).
+const NON_CHAT = /(tts|image|embedding|live|audio|computer-use|robotics|aqa|learnlm)/;
+
+const modelId = (m: GeminiModel) => (m.name ?? '').replace(/^models\//, '');
+
+// Newest version first, then by name — "gemini-3.5-flash" before "gemini-2.5-pro".
+function versionOf(id: string): number {
+  const m = /^gemini-(\d+(?:\.\d+)?)/.exec(id);
+  return m ? parseFloat(m[1]) : 0;
+}
+
 export const GeminiProvider: ModelProvider = {
   id: 'gemini',
   label: 'google · gemini api',
@@ -78,14 +112,9 @@ export const GeminiProvider: ModelProvider = {
   async verifyKey(apiKey: string) {
     if (!apiKey || !apiKey.trim()) return { ok: false, error: 'empty api key' };
     try {
-      const res = await fetch(`${BASE}/models`, { headers: { 'x-goog-api-key': apiKey } });
-      if (!res.ok) {
-        const body = await res.text();
-        return { ok: false, error: `${res.status} ${body.slice(0, 160)}` };
-      }
-      const data = (await res.json()) as { models?: { name?: string }[] };
-      if (!data.models || data.models.length === 0) return { ok: false, error: 'no models returned' };
-      const reachable = new Set(data.models.map((m) => (m.name ?? '').replace(/^models\//, '')));
+      const models = await fetchAllModels(apiKey);
+      if (models.length === 0) return { ok: false, error: 'no models returned' };
+      const reachable = new Set(models.map(modelId));
       const supportedModels = GeminiProvider.availableModels
         .map((m) => m.id)
         .filter((id) => reachable.has(id));
@@ -93,6 +122,23 @@ export const GeminiProvider: ModelProvider = {
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  },
+
+  async listModels(apiKey: string) {
+    const models = await fetchAllModels(apiKey);
+    const live = models
+      .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+      .map(modelId)
+      .filter((id) => id.startsWith('gemini-') && !NON_CHAT.test(id));
+    const liveIds = new Set(live);
+    const catalog = GeminiProvider.availableModels.filter((m) => liveIds.has(m.id));
+    const catalogIds = new Set(catalog.map((m) => m.id));
+    // Extras are labelled by id, matching how the header shows the current model.
+    const rest = live
+      .filter((id) => !catalogIds.has(id))
+      .sort((a, b) => versionOf(b) - versionOf(a) || a.localeCompare(b))
+      .map((id) => ({ id, label: id }));
+    return [...catalog, ...rest];
   },
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
