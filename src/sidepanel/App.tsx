@@ -50,11 +50,21 @@ export function App() {
     onOpenHistory: () => setView('history'),
   };
 
+  // Only surface an update when origin is genuinely ahead and the user hasn't waved off this exact
+  // head — mirrors hasPendingUpdate() in background/updates.ts.
+  const pendingUpdate =
+    a.update && a.update.aheadBy > 0 && a.update.dismissedSha !== a.update.latestSha ? a.update : null;
+  const updateProps = {
+    update: pendingUpdate,
+    onApplyUpdate: a.applyUpdate,
+    onDismissUpdate: a.dismissUpdate,
+  };
+
   const phase = snap.state.phase;
   const showEmpty = phase === 'idle' && snap.state.messages.length === 0;
 
   if (showEmpty) {
-    return <Empty c={c} {...common} onSubmit={a.sendMessage}/>;
+    return <Empty c={c} {...common} {...updateProps} onSubmit={a.sendMessage}/>;
   }
 
   const showNotifyBanner = !snap.settings.notifyEnabled && !snap.settings.notifyDismissed;
@@ -87,6 +97,7 @@ export function App() {
         a.testNotify();
       }}
       onDismissNotify={() => { a.setSettings({ notifyDismissed: true }); }}
+      {...updateProps}
     />
   );
 }

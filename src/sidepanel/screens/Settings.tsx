@@ -5,6 +5,7 @@ import { Ic } from '../../shared/icons';
 import { PanelShell, Body } from '../components/PanelShell';
 import { Switch, Toggle3 } from '../components/atoms';
 import { SettingRow } from '../cards/SettingRow';
+import { BUILD, shortSha } from '../../shared/build';
 import type { Settings as SettingsT, Mode, ApprovalMode } from '../../shared/types';
 import { getProvider, pickBestModel } from '../../background/providers';
 
@@ -204,6 +205,20 @@ export function Settings({
           label="on-page cursor & action pill"
           hint="show the gliding cursor and tool pill overlay while the agent clicks/types on the page"
           action={<Switch c={c} on={settings.showCursorOverlay} onClick={() => update({ showCursorOverlay: !settings.showCursorOverlay })}/>}
+        />
+
+        <Section c={c}>updates</Section>
+        <SettingRow c={c}
+          label="check for updates"
+          hint="asks github every few hours whether new commits have landed, and shows a banner if so. never downloads or runs anything on its own."
+          action={<Switch c={c} on={settings.checkForUpdates} onClick={() => update({ checkForUpdates: !settings.checkForUpdates })}/>}
+        />
+        <SettingRow c={c}
+          label="version"
+          hint={BUILD.sha ? `built from ${BUILD.branch} · ${BUILD.repoPath}` : 'built without git — update checks are disabled'}
+          action={<span style={{ fontSize: 11.5, color: c.muted }}>
+            {chrome.runtime.getManifest().version}{BUILD.sha ? ` · ${shortSha(BUILD.sha)}` : ''}
+          </span>}
         />
       </Body>
     </PanelShell>

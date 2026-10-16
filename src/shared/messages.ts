@@ -1,4 +1,4 @@
-import type { AgentState, Settings, HistoryItem, Mode, AllowlistEntry, PermissionScope, PermissionDuration } from './types';
+import type { AgentState, Settings, HistoryItem, Mode, AllowlistEntry, PermissionScope, PermissionDuration, UpdateInfo } from './types';
 
 export type PanelToBg =
   | { kind: 'send_message'; text: string }
@@ -15,10 +15,16 @@ export type PanelToBg =
   | { kind: 'set_settings'; patch: Partial<Settings> }
   | { kind: 'test_notify' }
   | { kind: 'open_history'; id: string }
-  | { kind: 'delete_history'; id: string };
+  | { kind: 'delete_history'; id: string }
+  | { kind: 'check_update' }
+  | { kind: 'dismiss_update'; sha: string }
+  | { kind: 'apply_update' };
 
 export type BgToPanel =
-  | { kind: 'state'; state: AgentState; settings: Settings; allowlist: AllowlistEntry[]; history: HistoryItem[] };
+  | { kind: 'state'; state: AgentState; settings: Settings; allowlist: AllowlistEntry[]; history: HistoryItem[] }
+  // Sent on connect and whenever a check changes the result. Kept separate from `state` because
+  // `state` is rebroadcast on every agent tick, while this changes about twice a day.
+  | { kind: 'update'; info: UpdateInfo | null };
 
 // `confirmed`: the user has already approved this as a critical action — skip the guardrail re-check
 // and perform the op. The background re-issues the same op with confirmed:true after the user confirms.

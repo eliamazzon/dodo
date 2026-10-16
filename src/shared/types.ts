@@ -32,6 +32,7 @@ export type Settings = {
   notifyDismissed: boolean;
   onboarded: boolean;
   showCursorOverlay: boolean;
+  checkForUpdates: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -46,6 +47,20 @@ export const DEFAULT_SETTINGS: Settings = {
   notifyDismissed: false,
   onboarded: false,
   showCursorOverlay: true,
+  checkForUpdates: true,
+};
+
+// What the background knows about commits waiting on origin. Lives in chrome.storage.local under
+// its own key rather than inside `settings` — it's derived state with its own refresh cadence.
+export type UpdateInfo = {
+  latestSha: string;
+  aheadBy: number;
+  notes: string[]; // commit subjects, newest first, capped
+  checkedAt: number;
+  // Set to the head SHA the user waved off. A newer push produces a different head, so the banner
+  // comes back on its own — that's what makes "notify on any commit" livable.
+  dismissedSha?: string;
+  rateLimitedUntil?: number;
 };
 
 // Internal planner output. Not part of AgentState; lives inside plan_proposal UIMessages.

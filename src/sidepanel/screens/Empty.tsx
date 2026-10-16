@@ -5,7 +5,8 @@ import { PanelShell, Body } from '../components/PanelShell';
 import { PanelHeader, type ModelOption } from '../components/PanelHeader';
 import { Composer } from '../components/Composer';
 import { Disclaimer } from '../components/atoms';
-import type { Mode } from '../../shared/types';
+import { UpdateBanner } from '../cards/UpdateBanner';
+import type { Mode, UpdateInfo } from '../../shared/types';
 
 const SAMPLES = [
   'extract every job posting on this page',
@@ -17,6 +18,7 @@ const SAMPLES = [
 export function Empty({
   c, mode, model, providerId, availableModels, onSelectModel,
   onSubmit, onChangeMode, onNewTask, onOpenSettings, onOpenHistory,
+  update, onApplyUpdate, onDismissUpdate,
 }: {
   c: Palette;
   mode: Mode;
@@ -29,6 +31,9 @@ export function Empty({
   onNewTask: () => void;
   onOpenSettings: () => void;
   onOpenHistory: () => void;
+  update: UpdateInfo | null;
+  onApplyUpdate: () => void;
+  onDismissUpdate: (sha: string) => void;
 }) {
   return (
     <PanelShell c={c}>
@@ -43,6 +48,11 @@ export function Empty({
         onHistory={onOpenHistory}
       />
       <Body c={c} pad="0">
+        {update && (
+          <div style={{ paddingTop: 10 }}>
+            <UpdateBanner c={c} info={update} onApply={onApplyUpdate} onDismiss={onDismissUpdate}/>
+          </div>
+        )}
         <div style={{
           flex: 1, display: 'flex', flexDirection: 'column',
           alignItems: 'flex-start', justifyContent: 'center',

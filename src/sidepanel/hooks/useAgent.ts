@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type AllowlistEntry, type PermissionScope, type PermissionDuration } from '../../shared/types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type AllowlistEntry, type PermissionScope, type PermissionDuration, type UpdateInfo } from '../../shared/types';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../../shared/messages';
 
 export type AgentSnapshot = {
@@ -23,17 +23,24 @@ export function useAgent() {
   // Flipped on the first `state` message from the background — the worker calls send() immediately
   // on connect, so this is one round-trip away. App shows a skeleton until then.
   const [hydrated, setHydrated] = useState(false);
+  // Commits waiting on origin, or null while unknown / up to date. Arrives on its own message kind
+  // rather than inside `snap` because it refreshes on a completely different cadence.
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const unmountedRef = useRef(false);
 
+  // Shared by the initial connect and by send()'s reconnect path, so both stay in sync.
+  const onMessage = useCallback((msg: BgToPanel) => {
+    if (msg.kind === 'state') {
+      setSnap({ state: msg.state, settings: msg.settings, allowlist: msg.allowlist, history: msg.history });
+      setHydrated(true);
+    } else if (msg.kind === 'update') {
+      setUpdate(msg.info);
+    }
+  }, []);
+
   useEffect(() => {
     unmountedRef.current = false;
-    const onMessage = (msg: BgToPanel) => {
-      if (msg.kind === 'state') {
-        setSnap({ state: msg.state, settings: msg.settings, allowlist: msg.allowlist, history: msg.history });
-        setHydrated(true);
-      }
-    };
     const connect = () => {
       if (unmountedRef.current) return;
       // During an extension reload the page's runtime context is invalidated and connect() throws.
@@ -60,7 +67,7 @@ export function useAgent() {
       try { portRef.current?.disconnect(); } catch {}
       portRef.current = null;
     };
-  }, []);
+  }, [onMessage]);
 
   const send = (m: PanelToBg) => {
     const tryPost = () => {
@@ -72,12 +79,7 @@ export function useAgent() {
     if (portRef.current && tryPost()) return;
     const port = chrome.runtime.connect({ name: PORT_NAME });
     portRef.current = port;
-    port.onMessage.addListener((msg: BgToPanel) => {
-      if (msg.kind === 'state') {
-        setSnap({ state: msg.state, settings: msg.settings, allowlist: msg.allowlist, history: msg.history });
-        setHydrated(true);
-      }
-    });
+    port.onMessage.addListener(onMessage);
     port.onDisconnect.addListener(() => { portRef.current = null; });
     try { port.postMessage(m); } catch {}
   };
@@ -85,6 +87,14 @@ export function useAgent() {
   return {
     snap,
     hydrated,
+    update,
+    checkUpdate: () => send({ kind: 'check_update' }),
+    dismissUpdate: (sha: string) => {
+      // Optimistic — the background echoes the same thing back, but the banner should vanish on click.
+      setUpdate((u) => (u ? { ...u, dismissedSha: sha } : u));
+      send({ kind: 'dismiss_update', sha });
+    },
+    applyUpdate: () => send({ kind: 'apply_update' }),
     sendMessage: (text: string) => send({ kind: 'send_message', text }),
     approveExecution: (messageId: string) => send({ kind: 'approve_execution', messageId }),
     rejectExecution: (messageId: string) => send({ kind: 'reject_execution', messageId }),

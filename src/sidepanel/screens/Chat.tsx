@@ -9,11 +9,12 @@ import { Markdown } from '../components/Markdown';
 import { PlanProposalCard } from '../cards/PlanProposalCard';
 import { ExecutionCard } from '../cards/ExecutionCard';
 import { PermissionCard } from '../cards/PermissionCard';
+import { UpdateBanner } from '../cards/UpdateBanner';
 import { CriticalConfirmCard } from '../cards/CriticalConfirmCard';
 import type { PermissionScope, PermissionDuration } from '../../shared/types';
 import { FileArtifactCard } from '../cards/FileArtifactCard';
 import { BrowserTabCard } from '../cards/BrowserTabCard';
-import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
+import type { Mode, AgentState, UIMessage, ToolName, UpdateInfo } from '../../shared/types';
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
@@ -107,6 +108,7 @@ export function Chat({
   onStop, onRetry, onChangeMode, onNewTask,
   onOpenSettings, onOpenHistory,
   showNotifyBanner, onEnableNotify, onDismissNotify,
+  update, onApplyUpdate, onDismissUpdate,
 }: {
   c: Palette;
   state: AgentState;
@@ -131,6 +133,9 @@ export function Chat({
   showNotifyBanner: boolean;
   onEnableNotify: () => void;
   onDismissNotify: () => void;
+  update: UpdateInfo | null;
+  onApplyUpdate: () => void;
+  onDismissUpdate: (sha: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -180,6 +185,7 @@ export function Chat({
         <div style={{ flex: 1, minHeight: 8 }}/>
       </div>
 
+      {update && <UpdateBanner c={c} info={update} onApply={onApplyUpdate} onDismiss={onDismissUpdate}/>}
       {showNotifyBanner && <NotifyBanner c={c} onEnable={onEnableNotify} onClose={onDismissNotify}/>}
       {state.activeTab && (
         <BrowserTabCard c={c} tab={state.activeTab} working={phase === 'working'}/>

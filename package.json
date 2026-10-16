@@ -9,7 +9,8 @@
     "dev": "vite build --watch",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",
-    "setup": "node scripts/install.mjs"
+    "setup": "node scripts/install.mjs",
+    "update": "node scripts/update.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.3",

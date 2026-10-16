@@ -4,17 +4,35 @@ import { loadStore, saveSettings, setAllowlist, getSettings, getAllowlist, delet
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../shared/messages';
 import { notifyForce } from './notify';
 import { initTabTracking } from './tools';
+import {
+  UPDATE_ALARM, ensureUpdateAlarm, checkForUpdate, getUpdateInfo,
+  dismissUpdate, maybeCheckOnConnect, subscribeUpdates,
+} from './updates';
 
 // Track tab lifecycle (new tabs opened by the agent's active tab, removed tabs) for multi-tab support.
 initTabTracking();
+
+// Assert the update alarm on every worker spin-up, not just onInstalled/onStartup — reloading an
+// unpacked extension doesn't reliably fire either of those. Idempotent, so this is a no-op once set.
+void ensureUpdateAlarm();
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   try {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   } catch {}
+  await ensureUpdateAlarm();
   if (details.reason === 'install') {
     await chrome.tabs.create({ url: chrome.runtime.getURL('src/onboarding/index.html') });
   }
+});
+
+// Alarms don't survive a browser restart in every case, so re-assert on startup too (idempotent).
+chrome.runtime.onStartup.addListener(() => {
+  void ensureUpdateAlarm();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === UPDATE_ALARM) void checkForUpdate();
 });
 
 // Debug hook — from the service-worker DevTools console (chrome://extensions →
@@ -31,6 +49,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== PORT_NAME) return;
 
   let unsub: (() => void) | null = null;
+  let unsubUpdates: (() => void) | null = null;
 
   const send = async () => {
     await agent.ready;
@@ -39,8 +58,17 @@ chrome.runtime.onConnect.addListener((port) => {
     try { port.postMessage(msg); } catch {}
   };
 
+  const sendUpdate = (info: Awaited<ReturnType<typeof getUpdateInfo>>) => {
+    const msg: BgToPanel = { kind: 'update', info };
+    try { port.postMessage(msg); } catch {}
+  };
+
   unsub = agent.subscribe(() => { void send(); });
+  unsubUpdates = subscribeUpdates(sendUpdate);
   void send();
+  // Push what we already know immediately, then refresh in the background if it's gone stale.
+  void getUpdateInfo().then(sendUpdate);
+  void maybeCheckOnConnect();
 
   port.onMessage.addListener(async (msg: PanelToBg) => {
     switch (msg.kind) {
@@ -92,11 +120,24 @@ chrome.runtime.onConnect.addListener((port) => {
         await deleteHistoryItem(msg.id);
         void send();
         break;
+      case 'check_update':
+        // Explicit user request — bypass the staleness window and the settings gate.
+        await checkForUpdate({ force: true });
+        break;
+      case 'dismiss_update':
+        await dismissUpdate(msg.sha);
+        break;
+      case 'apply_update':
+        // On an unpacked extension this re-reads dist/ from disk, picking up whatever the user's
+        // `npm run update` just built. The panel's port drops and reconnects on its own.
+        chrome.runtime.reload();
+        break;
     }
   });
 
   port.onDisconnect.addListener(() => {
     unsub?.();
+    unsubUpdates?.();
   });
 });
 
