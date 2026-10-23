@@ -396,7 +396,9 @@ class Agent {
     return this.state.phase === 'idle' || this.state.phase === 'complete' || this.state.phase === 'error';
   }
 
-  async sendMessage(text: string) {
+  // `opts.tabId` pins that tab for a NEW conversation instead of whichever tab is focused — used by
+  // the eval harness (eval.ts), whose window may not be focused while it runs.
+  async sendMessage(text: string, opts?: { tabId?: number }) {
     if (!text.trim()) return;
     if (!this.isIdle()) {
       log.warn('sendMessage ignored — agent busy', this.state.phase);
@@ -413,13 +415,17 @@ class Agent {
     const banner = modeChanged
       ? `[MODE CHANGED] The user just switched to "${MODE_LABEL[mode]}" mode${mode === 'plan' ? ' — you are now read-only: you may browse, but must not click/type/press; propose a plan for anything that needs acting' : ''}. This applies to this and following messages.`
       : '';
-    await this.startRun(text, text, banner);
+    await this.startRun(text, text, banner, opts?.tabId);
   }
 
   // Shared start of a run (a user message, or an approved plan): records the user turn — `uiText` in
   // the chat, `taskText` + page context for the model — pins the tab on the first turn, and runs the loop.
-  private async startRun(uiText: string, taskText: string, banner: string) {
+  private async startRun(uiText: string, taskText: string, banner: string, tabId?: number) {
     this.aborted = false;
+
+    // Pin the requested tab before building context, so the opening snapshot reads that tab
+    // (getActiveTab() prefers the pinned tab). The first-turn pin below then keeps it.
+    if (tabId != null && this.conversation.length === 0) pinActiveTab(tabId);
 
     if (!this.taskId) {
       this.taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -434,7 +440,7 @@ class Agent {
 
     // Pin active tab once at conversation start.
     if (this.conversation.length === 1) {
-      pinActiveTab(null);
+      if (tabId == null) pinActiveTab(null);
       const tab = await getActiveTab().catch(() => null);
       if (tab?.id != null) {
         pinActiveTab(tab.id);

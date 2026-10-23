@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { copyFileSync, mkdirSync, existsSync } from 'node:fs';
 
 const root = __dirname;
+let manifestOutDir = resolve(root, 'dist');
 
 export default defineConfig({
   plugins: [
@@ -11,8 +12,11 @@ export default defineConfig({
     {
       name: 'dodo-copy-manifest',
       apply: 'build',
+      configResolved(config) {
+        manifestOutDir = resolve(config.root, config.build.outDir);
+      },
       closeBundle() {
-        const outDir = resolve(root, 'dist');
+        const outDir = manifestOutDir;
         if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
         copyFileSync(resolve(root, 'public/manifest.json'), resolve(outDir, 'manifest.json'));
       },

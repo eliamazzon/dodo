@@ -1,5 +1,9 @@
 node_modules/
 dist/
+dist-eval/
+evals/runs/
+evals/.ext-id
+evals/.instance
 *.tsbuildinfo
 .ignore/
 console-*.log

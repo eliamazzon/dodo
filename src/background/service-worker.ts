@@ -4,6 +4,7 @@ import { loadStore, saveSettings, setAllowlist, getSettings, getAllowlist, delet
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../shared/messages';
 import { notifyForce } from './notify';
 import { initTabTracking } from './tools';
+import { installEvalHook } from './eval';
 
 // Track tab lifecycle (new tabs opened by the agent's active tab, removed tabs) for multi-tab support.
 initTabTracking();
@@ -26,6 +27,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // post-prune payload actually sent each turn (turn, model, char count, messages).
 (globalThis as unknown as { dodoExport: (includeImages?: boolean) => unknown }).dodoExport =
   (includeImages = true) => agent.exportForLLM(includeImages);
+
+// Eval harness hook (globalThis.dodoEval), driven by scripts/eval.mjs over CDP. Only in the eval build
+// (`npm run build:eval`) — the branch is constant-folded away, and eval.ts tree-shaken, everywhere else.
+if (import.meta.env.MODE === 'eval') installEvalHook();
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== PORT_NAME) return;
