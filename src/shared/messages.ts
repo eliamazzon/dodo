@@ -1,11 +1,13 @@
-import type { AgentState, Settings, HistoryItem, Mode, AllowlistEntry, PermissionScope, PermissionDuration } from './types';
+import type { AgentState, Settings, HistoryItem, Mode, AllowlistEntry, PermissionScope, PermissionDuration, AccessLevel } from './types';
 
 export type PanelToBg =
   | { kind: 'send_message'; text: string }
   | { kind: 'approve_execution'; messageId: string }
   | { kind: 'reject_execution'; messageId: string }
+  | { kind: 'approve_plan'; messageId: string; mode: Exclude<Mode, 'plan'> }
+  | { kind: 'reject_plan'; messageId: string }
   | { kind: 'stop' }
-  | { kind: 'allow_host'; pattern: string; scope: PermissionScope; duration: PermissionDuration }
+  | { kind: 'allow_host'; pattern: string; scope: PermissionScope; duration: PermissionDuration; access: AccessLevel }
   | { kind: 'deny_permission' }
   | { kind: 'confirm_critical'; messageId: string }
   | { kind: 'deny_critical'; messageId: string }
@@ -28,7 +30,8 @@ export type ContentOp =
   | { op: 'press'; selector?: string; key: string; modifiers?: ('Meta' | 'Control' | 'Alt' | 'Shift')[]; showOverlay?: boolean; confirmed?: boolean } // dispatch a real key event (Enter/Tab/Escape/arrows) to commit/submit/dismiss
   | { op: 'extract'; selector?: string; mode?: 'text' | 'map' }
   | { op: 'snapshot'; selector?: string; depth?: number }
-  | { op: 'snapshot_structured' } // structured elements[] — kept for the disabled planner path
+  | { op: 'resolve_link'; selector: string } // absolute http(s) href of a link (or its nearest a[href] ancestor) — follow_link navigates to it without clicking
+  | { op: 'snapshot_structured' } // structured elements[] — target resolution for execute_actions scripts
   | { op: 'set_working'; working: boolean }; // toggle the "agent is here" title prefix on this tab
 
 export type ContentResult =

@@ -1,7 +1,7 @@
 // Persistence access layer. Settings + allowlist live in chrome.storage.local (small, change-rarely,
 // and we want the free cross-context durability). History lives in IndexedDB via historyRepo (db.ts) —
 // this module delegates to it so callers keep the same function surface regardless of backend.
-import { DEFAULT_SETTINGS, type Settings, type HistoryItem, type AllowlistEntry, type PermissionScope } from '../shared/types';
+import { DEFAULT_SETTINGS, type Settings, type HistoryItem, type AllowlistEntry, type PermissionScope, type AccessLevel } from '../shared/types';
 import { historyRepo } from './db';
 
 type StoreShape = {
@@ -28,7 +28,13 @@ function normalizeAllowlist(raw: unknown): AllowlistEntry[] {
       out.push({ pattern: item, scope: 'domain' });
     } else if (item && typeof item === 'object' && typeof (item as AllowlistEntry).pattern === 'string') {
       const e = item as AllowlistEntry;
-      out.push({ pattern: e.pattern, scope: e.scope === 'page' ? 'page' : 'domain', ...(e.user ? { user: true } : {}) });
+      out.push({
+        pattern: e.pattern,
+        scope: e.scope === 'page' ? 'page' : 'domain',
+        // Entries written before the read/act split were act grants — keep them that way.
+        access: e.access === 'read' ? 'read' : 'act',
+        ...(e.user ? { user: true } : {}),
+      });
     }
   }
   return out;
@@ -41,8 +47,11 @@ function normalizeAllowlist(raw: unknown): AllowlistEntry[] {
 // query over the history table was pure overhead with no relationship to what was being read.
 async function loadLocalStore(): Promise<{ settings: Settings; allowlist: AllowlistEntry[] }> {
   const raw = await chrome.storage.local.get(KEYS as unknown as string[]);
+  const settings: Settings = { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) };
+  // 'watch' was renamed to 'plan' (read-only, now able to browse) — migrate on read.
+  if ((settings.defaultMode as string) === 'watch') settings.defaultMode = 'plan';
   return {
-    settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
+    settings,
     allowlist: raw.allowlist === undefined ? DEFAULT_ALLOWLIST : normalizeAllowlist(raw.allowlist),
   };
 }
@@ -72,19 +81,20 @@ export async function getAllowlist(): Promise<AllowlistEntry[]> {
 }
 
 // Called from the in-chat "always allow" flow, so entries are marked `user: true` — this is what
-// lets them bypass the prompt even in 'ask' mode (see isUserAllowed). If a matching entry already
-// exists but isn't yet user-granted (e.g. a seeded default the user has now explicitly allowed),
-// upgrade it in place so the explicit grant takes effect.
-export async function addAllowEntry(pattern: string, scope: PermissionScope): Promise<AllowlistEntry[]> {
+// lets them bypass the prompt even in 'ask' mode (see isUserAllowed). If the user already granted
+// this pattern+scope, widen its access (read → act) in place. Seeded/onboarding entries are never
+// touched — a separate user entry is appended instead — so a "read always" grant can't promote a
+// seeded act entry into an explicit act grant.
+export async function addAllowEntry(pattern: string, scope: PermissionScope, access: AccessLevel): Promise<AllowlistEntry[]> {
   const list = await getAllowlist();
-  const existing = list.find((e) => e.pattern === pattern && e.scope === scope);
+  const existing = list.find((e) => e.pattern === pattern && e.scope === scope && e.user);
   if (existing) {
-    if (existing.user) return list;
-    const next = list.map((e) => (e === existing ? { ...e, user: true } : e));
+    if (existing.access === 'act' || access === 'read') return list;
+    const next = list.map((e) => (e === existing ? { ...e, access: 'act' as const } : e));
     await chrome.storage.local.set({ allowlist: next });
     return next;
   }
-  const next = [...list, { pattern, scope, user: true }];
+  const next = [...list, { pattern, scope, access, user: true }];
   await chrome.storage.local.set({ allowlist: next });
   return next;
 }
@@ -95,7 +105,7 @@ export async function addAllowEntry(pattern: string, scope: PermissionScope): Pr
 export async function setAllowlist(hosts: string[]): Promise<void> {
   const current = await getAllowlist();
   const pageEntries = current.filter((e) => e.scope === 'page');
-  const domainEntries: AllowlistEntry[] = hosts.map((pattern) => ({ pattern, scope: 'domain' }));
+  const domainEntries: AllowlistEntry[] = hosts.map((pattern) => ({ pattern, scope: 'domain', access: 'act' }));
   await chrome.storage.local.set({ allowlist: [...domainEntries, ...pageEntries] });
 }
 
@@ -130,12 +140,14 @@ export function pageKeyFromUrl(url: string): string {
   }
 }
 
-// True if the given URL is covered by any allowlist entry: domain entries match the host (with the
-// *.example.com wildcard), page entries match the exact page key.
-export function matchesAllowlist(url: string, host: string, allowlist: AllowlistEntry[]): boolean {
+// True if the given URL is covered by any allowlist entry granting at least `need`: domain entries
+// match the host (with the *.example.com wildcard), page entries match the exact page key. An entry
+// without `access` is an act grant (pre-split), and act covers read.
+export function matchesAllowlist(url: string, host: string, allowlist: AllowlistEntry[], need: AccessLevel = 'act'): boolean {
   const pageKey = pageKeyFromUrl(url);
   return allowlist.some((e) =>
-    e.scope === 'domain' ? matchHost(host, e.pattern) : (!!pageKey && e.pattern === pageKey),
+    (need === 'read' || e.access !== 'read')
+    && (e.scope === 'domain' ? matchHost(host, e.pattern) : (!!pageKey && e.pattern === pageKey)),
   );
 }
 

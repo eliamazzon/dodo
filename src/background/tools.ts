@@ -1,9 +1,30 @@
-import type { ToolSchema } from '../shared/types';
+import type { ToolSchema, JsonSchemaProp } from '../shared/types';
 import type { ContentOp, ContentResult } from '../shared/messages';
 
 // Targets are described by visible properties (text/aria/placeholder/role/type), not CSS selectors —
 // selectors are resolved at execution time against a fresh snapshot.
-const SCRIPT_STEP_SCHEMA = {
+const FLAT_STEP_PROPS: Record<string, JsonSchemaProp> = {
+  url: { type: 'string', description: 'For navigate steps only.' },
+  target: {
+    type: 'object',
+    description: 'For click/type/press steps. Use visible properties — never CSS selectors or data-sel refs.',
+    properties: {
+      text: { type: 'string' },
+      aria: { type: 'string' },
+      placeholder: { type: 'string' },
+      role: { type: 'string' },
+      type: { type: 'string' },
+    },
+    required: [],
+  },
+  text: { type: 'string', description: 'For type steps: the text to type.' },
+  key: { type: 'string', description: 'For press steps: Enter, Tab, Escape, Backspace, ArrowUp/Down/Left/Right.' },
+  description: { type: 'string', description: 'Optional human-readable label for this step.' },
+};
+
+// Steps allowed inside a foreach — the same shape minus foreach itself (the provider schema can't
+// express recursion, and one level of nesting is all bulk work needs).
+const FLAT_STEP_SCHEMA: JsonSchemaProp = {
   type: 'object',
   description:
     'A single step. Shape depends on `action`: ' +
@@ -11,28 +32,26 @@ const SCRIPT_STEP_SCHEMA = {
     '{action:"snapshot"}; ' +
     '{action:"click",target:{text?,aria?,placeholder?,role?,type?},description?}; ' +
     '{action:"type",target:{...},text}; ' +
-    '{action:"extract"}.',
+    '{action:"press",key,target?}; ' +
+    '{action:"extract"}. ' +
+    'Inside a foreach, `{{item}}` in url/text/target values is replaced with the current item.',
   properties: {
-    action: {
-      type: 'string',
-      enum: ['navigate', 'snapshot', 'click', 'type', 'extract'],
-      description: 'Step kind.',
-    },
-    url: { type: 'string', description: 'For navigate steps only.' },
-    target: {
-      type: 'object',
-      description: 'For click/type steps. Use visible properties — never CSS selectors.',
-      properties: {
-        text: { type: 'string' },
-        aria: { type: 'string' },
-        placeholder: { type: 'string' },
-        role: { type: 'string' },
-        type: { type: 'string' },
-      },
-      required: [],
-    },
-    text: { type: 'string', description: 'For type steps: the text to type.' },
-    description: { type: 'string', description: 'Optional human-readable label for this step.' },
+    action: { type: 'string', enum: ['navigate', 'snapshot', 'click', 'type', 'press', 'extract'], description: 'Step kind.' },
+    ...FLAT_STEP_PROPS,
+  },
+  required: ['action'],
+};
+
+const SCRIPT_STEP_SCHEMA: JsonSchemaProp = {
+  type: 'object',
+  description:
+    `${FLAT_STEP_SCHEMA.description} ` +
+    'Or {action:"foreach",items:[...],steps:[...]} — runs `steps` once per item, substituting `{{item}}`.',
+  properties: {
+    action: { type: 'string', enum: ['navigate', 'snapshot', 'click', 'type', 'press', 'extract', 'foreach'], description: 'Step kind.' },
+    ...FLAT_STEP_PROPS,
+    items: { type: 'array', items: { type: 'string' }, description: 'For foreach steps: the values to iterate over.' },
+    steps: { type: 'array', items: FLAT_STEP_SCHEMA, description: 'For foreach steps: the steps to repeat per item (no nested foreach).' },
   },
   required: ['action'],
 };
@@ -66,6 +85,19 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       type: 'object',
       properties: { url: { type: 'string', description: 'Absolute URL to navigate to.' } },
       required: ['url'],
+    },
+  },
+  {
+    name: 'follow_link',
+    description:
+      'Open a link\'s URL without clicking it. Use for plain links (an <a href> element, or an element inside one); use click() for buttons and JS-driven items. Fails if the element is not an http(s) link. newTab:true opens it in a new tab that becomes the active one. After it returns, snapshot() before acting.',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'A `data-sel` ref of the link from the latest snapshot()/extract().' },
+        newTab: { type: 'boolean', description: 'Open in a new tab instead of the current one. Default false.' },
+      },
+      required: ['selector'],
     },
   },
   {
@@ -146,33 +178,48 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       required: ['tabId'],
     },
   },
-];
-
-// ── planner + executor — DISABLED for now, kept for later reuse ───────────────
-// These schemas are intentionally NOT part of TOOL_SCHEMAS, so the model is never
-// offered them and cannot call them. The handler/executor code in agent.ts stays
-// intact. To re-enable, spread PLANNER_TOOL_SCHEMAS back into TOOL_SCHEMAS.
-export const PLANNER_TOOL_SCHEMAS: ToolSchema[] = [
+  // ── plans — propose_plan in plan mode, update_plan while executing an approved one ─────────
   {
-    name: 'plan_actions',
+    name: 'propose_plan',
     description:
-      'Ask the planner to draft a deterministic action script (navigate/snapshot/click/type/extract steps) for a multi-step browser task. Side-effect free — returns the proposed script for you to inspect, refine, or pass to execute_actions. Provide the current page context (from a recent snapshot()) so the planner uses real visible labels for targets. Use this when you have a clear multi-step plan and want to batch into one approval + many cheap deterministic steps. For exploratory or unfamiliar pages, prefer the granular tools instead.',
+      'PLAN MODE ONLY. Present a concrete action plan to the user for approval. This ENDS your turn — the user approves (and it is then executed with acting tools) or replies with changes. Call it once, after you have explored enough that every step names the site/page and the exact visible labels of the elements involved.',
     parameters: {
       type: 'object',
       properties: {
-        goal: { type: 'string', description: 'What the script should accomplish.' },
-        pageContext: {
-          type: 'string',
-          description: 'Snapshot summary (URL, title, visible elements). Pass the formatted snapshot text from a recent snapshot() call.',
+        goal: { type: 'string', description: 'One sentence: what the plan accomplishes.' },
+        sites: { type: 'array', items: { type: 'string' }, description: 'Hosts the plan acts on (e.g. "mail.google.com") — no scheme, no paths. Approving grants act access on these for the run.' },
+        steps: { type: 'array', items: { type: 'string' }, description: 'Ordered, concrete, imperative steps (lowercase, no numbering).' },
+        bulk: {
+          type: 'object',
+          description: 'Optional: a repetitive part of the plan — what is done per item, and the full list of items.',
+          properties: {
+            description: { type: 'string', description: 'What is done for each item.' },
+            items: { type: 'array', items: { type: 'string' }, description: 'The items (e.g. email subjects, product names, URLs).' },
+          },
+          required: ['description', 'items'],
         },
       },
-      required: ['goal', 'pageContext'],
+      required: ['goal', 'sites', 'steps'],
+    },
+  },
+  {
+    name: 'update_plan',
+    description:
+      'While executing an approved plan: mark a plan step as done/skipped/failed so the user sees progress. Call it right after finishing each step (it can go in the same turn as your next action).',
+    parameters: {
+      type: 'object',
+      properties: {
+        step: { type: 'number', description: '1-based step number from the approved plan.' },
+        status: { type: 'string', enum: ['done', 'skipped', 'failed'], description: 'New status for the step.' },
+        note: { type: 'string', description: 'Optional short note (e.g. why it was skipped).' },
+      },
+      required: ['step', 'status'],
     },
   },
   {
     name: 'execute_actions',
     description:
-      'Run a script (array of action steps) deterministically. If approvalMode is always_ask the user sees a Approve/Reject card before any side effects. Returns { status, extracted, results } — extracted is the FULL concatenation of every extract step (no truncation), results is per-step status. Use this after plan_actions when ready to act.',
+      'Run a script of steps deterministically — for REPETITIVE work over a known list of items (bulk actions). Wrap the per-item steps in {action:"foreach",items:[...],steps:[...]} and use `{{item}}` in url/text/target values. Targets are visible properties (text/aria/placeholder/role/type), never data-sel refs — they are re-resolved against the live page at each step. Do the sequence once by hand with the granular tools first, so you know the exact labels. The user may be asked to approve the script first. Returns { status, extracted, results } — results is per expanded step; on failure the error names the failing item so you can continue from there with granular tools.',
     parameters: {
       type: 'object',
       properties: {

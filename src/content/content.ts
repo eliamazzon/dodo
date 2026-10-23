@@ -1175,6 +1175,21 @@ async function handle(op: ContentOp): Promise<ContentResult> {
     if (op.op === 'snapshot_structured') {
       return { ok: true, data: snapshot() };
     }
+    if (op.op === 'resolve_link') {
+      // follow_link: read the link's target without touching the page — the background navigates.
+      const el = resolveRef(op.selector);
+      if (!el) return { ok: false, error: `no element matches ${op.selector} — the ref may be stale, call snapshot() again` + nearMisses(op.selector, interactiveCandidates()) };
+      const a = el.closest('a[href]') as HTMLAnchorElement | null;
+      // `.href` is the absolute URL resolved against the link's own document (SVG <a> has an object here).
+      const href = a && typeof a.href === 'string' ? a.href : '';
+      if (!href) return { ok: false, error: `${op.selector} is not a link (no a[href]) — use click() for buttons and JS-driven items` };
+      let protocol = '';
+      try { protocol = new URL(href).protocol; } catch { /* unparseable */ }
+      if (protocol !== 'http:' && protocol !== 'https:') {
+        return { ok: false, error: `${op.selector} links to a non-web URL (${href.slice(0, 40)}) — it can't be followed; use click() if acting is allowed` };
+      }
+      return { ok: true, data: { href, label: elementLabel(a!) } };
+    }
     return { ok: false, error: 'unknown op' };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

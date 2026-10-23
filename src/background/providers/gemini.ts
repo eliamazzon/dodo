@@ -59,7 +59,13 @@ function toGeminiContents(messages: ChatMessage[]): GeminiContent[] {
         parts.push({ functionResponse: { name: p.name, response } });
       }
     }
-    if (parts.length) out.push({ role, parts });
+    if (!parts.length) continue;
+    // Our 'tool' and 'user' roles both map to Gemini 'user'. A run that ends on a tool result
+    // (propose_plan, stop mid-batch) is followed by a user message — fold it into the same content
+    // so Gemini always sees strictly alternating turns.
+    const prev = out[out.length - 1];
+    if (role === 'user' && prev?.role === 'user') prev.parts.push(...parts);
+    else out.push({ role, parts });
   }
   return out;
 }

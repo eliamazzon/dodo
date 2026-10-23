@@ -195,13 +195,13 @@ export function Settings({
           action={<Toggle3
             c={c}
             value={settings.defaultMode}
-            options={['ask','auto','watch']}
+            options={['ask','auto','plan']}
             onChange={(v) => update({ defaultMode: v as Mode })}
           />}
         />
         <SettingRow c={c}
           label="script approval"
-          hint="ask before running plan_actions scripts, or auto-accept"
+          hint="ask before running bulk-action scripts, or auto-accept"
           action={<Toggle3
             c={c}
             value={settings.approvalMode === 'always_ask' ? 'ask' : 'auto'}

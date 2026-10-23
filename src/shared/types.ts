@@ -1,5 +1,11 @@
-// 'ask' requires user approval before each navigation; 'auto' runs fully autonomously; 'watch' observes without acting.
-export type Mode = 'ask' | 'auto' | 'watch';
+// 'ask' requires user approval before each navigation; 'auto' runs fully autonomously; 'plan' is
+// read-only — it can browse (navigate, follow links, switch tabs) and ends by proposing a plan, but
+// never clicks/types. ('watch' is the legacy name for 'plan'; migrated on read in store.ts.)
+export type Mode = 'ask' | 'auto' | 'plan';
+
+// What a permission grant allows. 'read' = view the page (snapshot/extract/screenshot) and navigate
+// to it; 'act' = also click/type/press on it. 'act' implies 'read'.
+export type AccessLevel = 'read' | 'act';
 
 // Gates execute_actions. 'always_ask' surfaces an inline Approve/Reject card; 'auto_accept' runs immediately.
 export type ApprovalMode = 'always_ask' | 'auto_accept';
@@ -17,8 +23,8 @@ export type PermissionDuration = 'once' | 'session' | 'always';
 // `user: true` marks an entry the user explicitly granted via the in-chat "always allow" prompt (as
 // opposed to a seeded default or an onboarding-selected domain). Explicit user grants are honored even
 // in 'ask' mode — "always allow" means don't ask again — whereas seeded/onboarding entries still prompt
-// in 'ask' mode.
-export type AllowlistEntry = { pattern: string; scope: PermissionScope; user?: boolean };
+// in 'ask' mode. `access` defaults to 'act' when absent (entries written before the read/act split).
+export type AllowlistEntry = { pattern: string; scope: PermissionScope; user?: boolean; access?: AccessLevel };
 
 export type Settings = {
   providerId: string;
@@ -48,13 +54,11 @@ export const DEFAULT_SETTINGS: Settings = {
   showCursorOverlay: true,
 };
 
-// Internal planner output. Not part of AgentState; lives inside plan_proposal UIMessages.
-export type Plan = {
-  sites: string[];
-  steps: string[];
-  script: ScriptStep[];
-  explanation?: string;
-};
+// A repetitive step from a proposed plan: what is done per item, and the items it's done for.
+export type PlanBulk = { description: string; items: string[] };
+
+export type PlanStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
+export type PlanStepStatus = 'todo' | 'done' | 'skipped' | 'failed';
 
 export type ScriptTarget = {
   text?: string;
@@ -64,12 +68,19 @@ export type ScriptTarget = {
   type?: string;
 };
 
-export type ScriptStep =
+// A step that runs directly (no nesting). `{{item}}` placeholders are substituted when a foreach expands.
+export type FlatScriptStep =
   | { action: 'navigate'; url: string; description?: string }
   | { action: 'snapshot'; description?: string }
   | { action: 'click'; target: ScriptTarget; description?: string }
   | { action: 'type'; target: ScriptTarget; text: string; description?: string }
+  | { action: 'press'; key: string; target?: ScriptTarget; description?: string }
   | { action: 'extract'; description?: string };
+
+// `foreach` repeats `steps` once per item (one level of nesting only) — expanded before execution.
+export type ScriptStep =
+  | FlatScriptStep
+  | { action: 'foreach'; items: string[]; steps: FlatScriptStep[]; description?: string };
 
 export type SnapshotElement = {
   tag: string;
@@ -106,8 +117,10 @@ export type ToolName =
   | 'extract'
   | 'list_tabs'
   | 'switch_tab'
+  | 'follow_link'
   | 'generate_file'
-  | 'plan_actions'
+  | 'propose_plan'
+  | 'update_plan'
   | 'execute_actions';
 
 export type AgentPhase =
@@ -126,14 +139,20 @@ export type PendingPermission = {
   // user picks is guaranteed to use the exact same key `matchesAllowlist` checks against.
   pageKey: string;
   reason: string;
+  // The level this prompt grants: 'read' in plan mode, 'act' in ask/auto.
+  access: AccessLevel;
 };
+
+// What a critical-action confirmation is about. 'navigate' covers navigate/follow_link to a URL that
+// looks state-changing (logout, unsubscribe, delete…).
+export type CriticalAction = 'click' | 'type' | 'press' | 'navigate';
 
 export type PendingCritical = {
   messageId: string;
 };
 
 export type StepResult = {
-  action: ScriptStep['action'];
+  action: FlatScriptStep['action'];
   status: 'ok' | 'error' | 'skipped';
   error?: string;
 };
@@ -166,14 +185,22 @@ export type UIMessage =
       goal: string;
       sites?: string[];
       steps: string[];
-      script: ScriptStep[];
+      bulk?: PlanBulk;
+      // Absent on legacy (pre-plan-mode) history entries — rendered read-only.
+      status?: PlanStatus;
+      stepStatus?: PlanStepStatus[];
+      // Legacy fields from the old plan_actions planner; kept so old history still renders.
+      script?: ScriptStep[];
       explanation?: string;
       t: number;
     }
   | {
       id: string;
       kind: 'execution';
+      // As the model wrote it (foreach unexpanded) — for display.
       script: ScriptStep[];
+      // Number of steps after foreach expansion — `results` indexes into the expanded list.
+      expandedCount?: number;
       status: ExecutionStatus;
       rationale?: string;
       results?: StepResult[];
@@ -188,13 +215,14 @@ export type UIMessage =
       url: string;
       pageKey: string;
       reason: string;
+      access?: AccessLevel; // absent on legacy history entries (= 'act')
       status: 'pending' | 'allowed' | 'denied';
       t: number;
     }
   | {
       id: string;
       kind: 'critical_confirm';
-      action: 'click' | 'type' | 'press';
+      action: CriticalAction;
       label: string;
       reason: string;
       status: 'pending' | 'confirmed' | 'denied';

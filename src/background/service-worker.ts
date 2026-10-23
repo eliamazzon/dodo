@@ -53,11 +53,17 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'reject_execution':
         void agent.rejectExecution(msg.messageId);
         break;
+      case 'approve_plan':
+        void agent.approvePlan(msg.messageId, msg.mode);
+        break;
+      case 'reject_plan':
+        await agent.rejectPlan(msg.messageId);
+        break;
       case 'stop':
         await agent.stop();
         break;
       case 'allow_host':
-        await agent.decidePermission(msg.pattern, msg.scope, msg.duration);
+        await agent.decidePermission(msg.pattern, msg.scope, msg.duration, msg.access);
         break;
       case 'deny_permission':
         await agent.denyPermission();

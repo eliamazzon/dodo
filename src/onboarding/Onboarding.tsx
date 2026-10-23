@@ -309,7 +309,7 @@ function Ready({ settings, allowlist }: { settings: Settings; allowlist: string[
         <div><span style={{ color: c.muted }}>provider </span><span style={{ color: c.accent }}>gemini</span></div>
         <div><span style={{ color: c.muted }}>model    </span>{settings.model}</div>
         <div><span style={{ color: c.muted }}>hosts    </span>{allowlist.length} allowed</div>
-        <div><span style={{ color: c.muted }}>mode     </span>{mode === 'ask' ? 'ask before acting' : mode === 'auto' ? 'act on allowlist' : 'watch only'}</div>
+        <div><span style={{ color: c.muted }}>mode     </span>{mode === 'ask' ? 'ask before acting' : mode === 'auto' ? 'act on allowlist' : 'read & plan'}</div>
       </div>
     </div>
   );

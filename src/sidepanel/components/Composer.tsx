@@ -8,7 +8,7 @@ import type { Mode } from '../../shared/types';
 const MODE_LABEL: Record<Mode, string> = {
   ask: 'ask before acting',
   auto: 'act on allowlist',
-  watch: 'watch only',
+  plan: 'read & plan',
 };
 
 const COMMANDS: [string, string][] = [
@@ -21,7 +21,7 @@ const COMMANDS: [string, string][] = [
 const MODE_OPTIONS: { k: Mode; label: string; desc: string; kbd: string }[] = [
   { k: 'ask',   label: 'ask before acting', desc: 'confirm each action', kbd: '⌘1' },
   { k: 'auto',  label: 'act on allowlist',  desc: 'no prompt for allowed hosts', kbd: '⌘2' },
-  { k: 'watch', label: 'watch only',        desc: 'read-only · no actions', kbd: '⌘3' },
+  { k: 'plan',  label: 'read & plan',       desc: 'read-only · browses links & tabs, proposes a plan', kbd: '⌘3' },
 ];
 
 export function Composer({

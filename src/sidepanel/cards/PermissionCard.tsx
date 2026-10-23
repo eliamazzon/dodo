@@ -3,7 +3,8 @@ import type { Palette } from '../../shared/tokens';
 import { DODO_FONT } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
 import { PrimaryBtn, GhostBtn } from '../components/atoms';
-import type { PermissionScope, PermissionDuration } from '../../shared/types';
+import type { PermissionScope, PermissionDuration, AccessLevel } from '../../shared/types';
+import { domainPatternOf } from '../../shared/permissions';
 
 // Short, readable version of the page path for display (host + truncated path, no scheme).
 function prettyPath(url: string): string {
@@ -17,16 +18,8 @@ function prettyPath(url: string): string {
   }
 }
 
-// A domain grant is stored as a `*.example.com` wildcard (matching the format of the seeded
-// defaults), not the bare host — otherwise "whole domain" only ever matched the exact host the
-// prompt happened to fire on (e.g. granting on "amazon.com" wouldn't cover "www.amazon.com").
-function domainPatternOf(host: string): string {
-  const base = host.startsWith('www.') ? host.slice(4) : host;
-  return `*.${base}`;
-}
-
 export function PermissionCard({
-  c, host, url, pageKey, reason, onDecide, onDeny,
+  c, host, url, pageKey, reason, access, onDecide, onDeny,
 }: {
   c: Palette;
   host: string;
@@ -35,14 +28,16 @@ export function PermissionCard({
   // exactly what `matchesAllowlist` checks against — no risk of the UI's derivation drifting from it.
   pageKey: string;
   reason?: string;
-  onDecide?: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
+  // What the grant allows — 'read' in plan mode, 'act' (read + click/type) otherwise.
+  access: AccessLevel;
+  onDecide?: (pattern: string, scope: PermissionScope, duration: PermissionDuration, access: AccessLevel) => void;
   onDeny?: () => void;
 }) {
   // Default to the narrower "this page" scope; the user can widen to the whole domain deliberately.
   const [scope, setScope] = useState<PermissionScope>('page');
   const pattern = scope === 'page' ? pageKey : domainPatternOf(host);
   const target = scope === 'page' ? prettyPath(url) : host;
-  const decide = (duration: PermissionDuration) => onDecide?.(pattern, scope, duration);
+  const decide = (duration: PermissionDuration) => onDecide?.(pattern, scope, duration, access);
 
   const tab = (s: PermissionScope, label: string) => (
     <button
@@ -67,17 +62,22 @@ export function PermissionCard({
       <div style={{
         fontSize: 10, color: c.accent, letterSpacing: '0.08em',
         textTransform: 'uppercase', marginBottom: 8,
-      }}>permission required</div>
+      }}>{access === 'read' ? 'read access required' : 'permission required'}</div>
       <div style={{ fontSize: 14, color: c.ink, lineHeight: 1.4, marginBottom: 4 }}>
-        allow dodo to act on
+        {access === 'read' ? 'allow dodo to read' : 'allow dodo to act on'}
       </div>
       <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12,
+        display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 8,
         padding: '5px 10px', borderRadius: 5,
         background: c.accentBg, color: c.accentInk, fontSize: 13, fontWeight: 600,
         maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
         <Ic.Globe size={13}/> {target}
+      </div>
+      <div style={{ fontSize: 11, color: c.muted, lineHeight: 1.45, marginBottom: 12 }}>
+        {access === 'read'
+          ? 'read-only — dodo can view and navigate here, never click or type'
+          : 'dodo can read, click and type here'}
       </div>
       {reason && (
         <div style={{

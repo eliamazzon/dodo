@@ -10,7 +10,7 @@ import { PlanProposalCard } from '../cards/PlanProposalCard';
 import { ExecutionCard } from '../cards/ExecutionCard';
 import { PermissionCard } from '../cards/PermissionCard';
 import { CriticalConfirmCard } from '../cards/CriticalConfirmCard';
-import type { PermissionScope, PermissionDuration } from '../../shared/types';
+import type { PermissionScope, PermissionDuration, AccessLevel } from '../../shared/types';
 import { FileArtifactCard } from '../cards/FileArtifactCard';
 import { BrowserTabCard } from '../cards/BrowserTabCard';
 import type { Mode, AgentState, UIMessage, ToolName } from '../../shared/types';
@@ -19,7 +19,8 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n
 
 const toolIcon = (name: ToolName) => {
   switch (name) {
-    case 'navigate': return <Ic.Globe size={12}/>;
+    case 'navigate':
+    case 'follow_link': return <Ic.Globe size={12}/>;
     case 'screenshot': return <Ic.Camera size={12}/>;
     case 'snapshot': return <Ic.List size={12}/>;
     case 'click': return <Ic.Pointer size={12}/>;
@@ -102,7 +103,7 @@ function ToolDetailBlock({ c, label, muted, children }: {
 
 export function Chat({
   c, state, mode, model, providerId, availableModels, onSelectModel,
-  onSendMessage, onApproveExecution, onRejectExecution,
+  onSendMessage, onApproveExecution, onRejectExecution, onApprovePlan, onRejectPlan,
   onDecide, onDeny, onConfirmCritical, onDenyCritical,
   onStop, onRetry, onChangeMode, onNewTask,
   onOpenSettings, onOpenHistory,
@@ -118,7 +119,9 @@ export function Chat({
   onSendMessage: (text: string) => void;
   onApproveExecution: (messageId: string) => void;
   onRejectExecution: (messageId: string) => void;
-  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
+  onApprovePlan: (messageId: string, mode: Exclude<Mode, 'plan'>) => void;
+  onRejectPlan: (messageId: string) => void;
+  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration, access: AccessLevel) => void;
   onDeny: () => void;
   onConfirmCritical: (messageId: string) => void;
   onDenyCritical: (messageId: string) => void;
@@ -159,7 +162,11 @@ export function Chat({
         display: 'flex', flexDirection: 'column',
       }}>
         {state.messages.map((m) => renderMessage(m, {
-          c, onApproveExecution, onRejectExecution, onDecide, onDeny, onConfirmCritical, onDenyCritical,
+          c, onApproveExecution, onRejectExecution, onApprovePlan, onRejectPlan, onDecide, onDeny, onConfirmCritical, onDenyCritical,
+          // Plans run in an act mode: the current one if it's already acting, else "ask before acting".
+          runMode: mode === 'plan' ? 'ask' : mode,
+          // Approving starts a new run — only possible while the agent is idle.
+          idle: phase === 'idle' || phase === 'complete' || phase === 'error',
         }))}
 
         {phase === 'working' && (
@@ -202,10 +209,14 @@ function renderMessage(m: UIMessage, props: {
   c: Palette;
   onApproveExecution: (id: string) => void;
   onRejectExecution: (id: string) => void;
-  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration) => void;
+  onApprovePlan: (id: string, mode: Exclude<Mode, 'plan'>) => void;
+  onRejectPlan: (id: string) => void;
+  onDecide: (pattern: string, scope: PermissionScope, duration: PermissionDuration, access: AccessLevel) => void;
   onDeny: () => void;
   onConfirmCritical: (id: string) => void;
   onDenyCritical: (id: string) => void;
+  runMode: Exclude<Mode, 'plan'>;
+  idle: boolean;
 }) {
   const { c } = props;
   if (m.kind === 'user') {
@@ -240,8 +251,13 @@ function renderMessage(m: UIMessage, props: {
         goal={m.goal}
         sites={m.sites}
         steps={m.steps}
-        scriptSteps={m.script.length}
-        explanation={m.explanation}
+        bulk={m.bulk}
+        // A pending plan can't be approved mid-run — show it as-is until the agent is idle again.
+        status={m.status === 'pending' && !props.idle ? undefined : m.status}
+        stepStatus={m.stepStatus}
+        defaultRunMode={props.runMode}
+        onApprove={(mode) => props.onApprovePlan(m.id, mode)}
+        onReject={() => props.onRejectPlan(m.id)}
       />
     );
   }
@@ -251,6 +267,7 @@ function renderMessage(m: UIMessage, props: {
         key={m.id}
         c={c}
         script={m.script}
+        expandedCount={m.expandedCount}
         status={m.status}
         rationale={m.rationale}
         results={m.results}
@@ -268,7 +285,7 @@ function renderMessage(m: UIMessage, props: {
           fontSize: 11, color: c.muted, marginBottom: 10, padding: '5px 9px',
           background: c.surface2, border: `1px solid ${c.border}`, borderRadius: 6,
         }}>
-          permission for {m.host}: {m.status}
+          {m.access === 'read' ? 'read access' : 'permission'} for {m.host}: {m.status}
         </div>
       );
     }
@@ -280,6 +297,7 @@ function renderMessage(m: UIMessage, props: {
           url={m.url}
           pageKey={m.pageKey}
           reason={m.reason}
+          access={m.access ?? 'act'}
           onDecide={props.onDecide}
           onDeny={props.onDeny}
         />

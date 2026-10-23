@@ -77,6 +77,8 @@ export function App() {
       onSendMessage={a.sendMessage}
       onApproveExecution={a.approveExecution}
       onRejectExecution={a.rejectExecution}
+      onApprovePlan={a.approvePlan}
+      onRejectPlan={a.rejectPlan}
       onDecide={a.decidePermission}
       onDeny={a.deny}
       onConfirmCritical={a.confirmCritical}

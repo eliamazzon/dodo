@@ -3,19 +3,22 @@
 // actions. snapshot() returns the page as HTML (interactive elements carry a `data-sel` the model
 // passes to click/type); click() returns a diff of what changed. The final assistant text is the
 // answer — no forced summary tool.
-// (The planner/executor tools — plan_actions/execute_actions — are currently disabled but their
-// code is retained below for later reuse.)
+// Plan mode is the read-only variant: it browses (navigate/follow_link/switch_tab) but never acts,
+// and ends with propose_plan. Approving a plan re-runs the loop in an act mode; repetitive work can
+// go through execute_actions (a deterministic script with foreach).
 import type {
-  AgentState, Plan, HistoryItem, HistoryStatus, SavedConversationMessage, SavedConversationPart,
-  ScriptStep, SnapshotElement, SnapshotResult, HtmlSnapshotResult, ScriptTarget,
+  AgentState, HistoryItem, HistoryStatus, SavedConversationMessage, SavedConversationPart,
+  ScriptStep, FlatScriptStep, SnapshotElement, SnapshotResult, HtmlSnapshotResult, ScriptTarget,
   UIMessage, ToolName, StepResult, ExecutionStatus, AllowlistEntry, PermissionScope, PermissionDuration, Mode, Settings,
+  AccessLevel, CriticalAction, PlanBulk, PlanStepStatus,
 } from '../shared/types';
 import { INITIAL_AGENT_STATE } from '../shared/types';
 import type { ChatMessage, ContentPart } from './providers/types';
 import type { ContentOp } from '../shared/messages';
+import { domainPatternOf } from '../shared/permissions';
 import { getProvider } from './providers';
 import { TOOL_SCHEMAS, getActiveTab, hostFromUrl, navigateTab, captureScreenshot, runContentOp, pinActiveTab, getPinnedTabId, consumePendingNewTab, listTabs, setTabWorking, waitForTabComplete, armPopupWatch } from './tools';
-import { getSettings, upsertHistory, getHistoryItem, addAllowEntry, matchesAllowlist, pageKeyFromUrl } from './store';
+import { getSettings, saveSettings, upsertHistory, getHistoryItem, addAllowEntry, matchesAllowlist, pageKeyFromUrl } from './store';
 import { isAllowed, isUserAllowed } from './permissions';
 import { log } from './log';
 import { notify } from './notify';
@@ -28,11 +31,14 @@ You drive the browser with these tools, one action at a time, inspecting the pag
   • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token (e.g. data-sel="e42"); pass that ref as the selector to click/type. snapshot() gives a full-page overview (3 levels deep). To read a specific container IN FULL — a dropdown, dialog, table, list, menu — snapshot({element: "e42"}) fully expands just that one (\`element\` is a ref from the latest snapshot), and snapshot({element, n}) expands it n levels. This drill-in is your PRIMARY way to read deep or long content: start with snapshot() for the overview, then snapshot({element}) the part you care about.
   • screenshot() — capture the viewport as a JPEG (layout context, no refs).
   • navigate({url}) — go to a URL. Triggers a host-allowlist prompt if needed.
+  • follow_link({selector, newTab?}) — open a plain link (<a href>) by its URL instead of clicking it. Prefer it over click() for ordinary links; use click() for buttons and JS-driven items.
   • click({selector}) — click an element. Selector must be a \`data-sel\` ref from snapshot(). Returns a diff of what changed in the DOM (appeared/disappeared/aria changes), with fresh refs for anything that appeared.
   • type({selector, text}) — type into an input/textarea/rich-text editor (contentEditable), identified by a \`data-sel\` ref. Returns the resulting \`value\`; if the diff is empty but \`value\` shows your text, it worked — do NOT retry. type() does not submit. For an input/textarea it sets the value; for a contentEditable editor it INSERTS at the cursor (it does not erase existing text). A message/document compose BODY is usually a contentEditable editor, often inside an iframe — extract({mode:"map"}) lists it (it descends into same-origin iframes; the editor appears flagged \`contenteditable\` with its id), so map → type() into that ref. Don't hunt for it with repeated snapshots. Write the WHOLE body in a SINGLE type() call (use \\n for line breaks); composing it across several type()/toolbar-click cycles is unreliable and not worth it — toolbar formatting (bold/lists) does not apply cleanly via clicks.
   • press({key, selector?}) — dispatch a real key press (Enter, Tab, Escape, Backspace, Arrow keys). Use it ONLY when an action needs a keystroke: Enter to COMMIT a typed value that becomes a chip/selection (a recipient/email/tag in a To field, or an autocomplete/combobox/search pick), or Escape to dismiss a menu/dialog. Omit \`selector\` to press on the currently focused element (e.g. right after the type() that needs committing). Do NOT press after typing into a plain text field (subject, body, search-as-you-type, normal forms) — that text is already entered. Do NOT use Tab just to "move to the next field"; locate the target element via snapshot/extract and type() into it directly.
   • extract({selector?, mode?}) — the FALLBACK for what snapshot can't show. Use it only when a snapshot — even after snapshot({element}) on the relevant container — comes back truncated / depth-limited, or the page's DOM snapshot is empty/uninformative (some SPAs render nothing useful into the static DOM). mode="map" (default) flattens the whole page (or a scoped region) to a COMPACT one-line-per-element list of EVERY interactive element with its \`data-sel\` ref + label — use it to enumerate a list/grid/menu/results that snapshot couldn't fully show. mode="text" returns the full readable page text for reading prose/tables/prices. Also use extract({mode:"map"}) to locate a contentEditable compose editor (often inside an iframe; it appears flagged \`contenteditable\` with its id). Prefer snapshot drill-in first.
   • list_tabs() / switch_tab({tabId}) — list the open browser tabs and make a different one active (all later tools target the active tab). You work on ONE tab at a time. When an action you take opens a NEW tab, it becomes active AUTOMATICALLY and the tool result tells you — you don't need switch_tab for that. After switching or following a new tab, snapshot() before acting.
+  • execute_actions({script}) — BULK actions: run a deterministic script, with {action:"foreach",items,steps} to repeat a sequence over a known list of items (roughly 5+ items: label/archive/move many emails, fill many rows, open many results). First do the sequence ONCE by hand with the granular tools to learn the exact visible labels, then script the rest. Script targets are visible properties (text/aria/placeholder/role/type) — never data-sel refs. If it fails partway, the result names the failing item; continue from there.
+  • update_plan({step, status}) — when executing an APPROVED PLAN (the message says so), mark each plan step done/skipped/failed right after finishing it, so the user sees progress.
 
 The first message already includes a fresh snapshot of the current page — read it first; you do NOT need to call snapshot() again as your opening move. click() returns a DOM diff, so you usually don't need to snapshot() again just to see what a click did — read the diff. Only re-snapshot when the diff is insufficient or you need fresh \`data-sel\` refs for elements that just appeared. After a navigate (new page), always snapshot() before acting.
 
@@ -48,63 +54,65 @@ RULES:
 - Never navigate to a host not in the allowlist without going through the navigate() tool's permission flow.
 - Google Sheets (and Google Docs/Slides) render ALL grid/document content as canvas — snapshot() and extract() show only the toolbar chrome, never cell values or document body. BEFORE doing anything else on a Google Sheets page, enable accessibility mode with press({key:"z", modifiers:["Meta","Alt"]}) (⌘⌥Z on Mac). Wait for the DOM to update, then snapshot() — cells will now render as real DOM elements you can read. Sheet tab clicks may silently fail; switch sheets via URL instead: navigate({url: "https://docs.google.com/spreadsheets/d/ID/edit?gid=SHEET_GID#gid=SHEET_GID"}) where the gid is visible in the current URL's #gid= hash.`;
 
-// The read-only tools — the only ones offered to the model in watch mode.
-const READ_ONLY_TOOLS = new Set<ToolName>(['snapshot', 'screenshot', 'extract', 'list_tabs', 'generate_file']);
+// The only tools plan mode may run — reading and moving between pages, never acting on them.
+const PLAN_MODE_TOOLS = new Set<ToolName>([
+  'snapshot', 'screenshot', 'extract', 'list_tabs', 'switch_tab', 'navigate', 'follow_link', 'generate_file', 'propose_plan',
+]);
+
+// Tools that change the page — they need 'act' access on it. Everything else that touches a page
+// (snapshot/extract/screenshot/navigate/follow_link) needs only 'read'.
+const ACT_TOOLS = new Set<ToolName>(['click', 'type', 'press']);
 
 // Human-readable mode names, shown to the model (and user) when the permission mode changes mid-chat.
 const MODE_LABEL: Record<Mode, string> = {
   ask: 'ask before acting',
   auto: 'act on allowlist',
-  watch: 'watch only (read-only)',
+  plan: 'read & plan (read-only)',
 };
 
-// Watch-mode system prompt: the model can inspect the page and answer/extract, but has no action tools
-// at all (they're filtered out of the schema), so it physically cannot click/type/press/navigate.
-const WATCH_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser. You are currently in WATCH MODE — strictly read-only. You can inspect the active page and answer questions about it or extract data from it, but you must NOT change anything: no clicking, typing, key presses, navigation, or tab switching. Calling any of those tools will be rejected — treat this conversation as if they don't exist.
+// A URL whose mere GET plausibly changes state (log out, unsubscribe, delete…). Plan mode refuses to
+// open one; act modes ask the user to confirm first. Matched against WHOLE path segments (minus a file
+// extension) and query keys/values — so /account/logout.php or ?action=delete match, but an article
+// slug like /wiki/Logout_(computing) or /how-to-remove-stains doesn't.
+const SIDE_EFFECT_WORD = /^(log-?out|log_out|sign-?out|sign_out|unsubscribe|delete|destroy|remove|confirm|approve)$/i;
+
+function sideEffectPath(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const segments = u.pathname.split('/').map((s) => s.replace(/\.\w{2,5}$/, ''));
+    const query = [...u.searchParams].flatMap(([k, v]) => [k, v]);
+    return [...segments, ...query].some((t) => SIDE_EFFECT_WORD.test(t));
+  } catch {
+    return false;
+  }
+}
+
+// Plan-mode system prompt: the model can read and browse (navigate, follow links, switch tabs) but
+// click/type/press/execute_actions are refused at dispatch. Anything that needs acting ends in
+// propose_plan, which the user approves before an act-mode run executes it.
+const PLAN_MODE_SYSTEM = `You are DODO, an open-source browser agent operating inside the user's Chrome browser. You are currently in READ & PLAN MODE — read-only. You can read pages and move between them, but you must NOT change anything: no clicking, typing, or key presses. Those tools will be rejected.
 
 Your tools:
   • snapshot() — get the page DOM as HTML. Interactive elements carry a short \`data-sel\` ref token. snapshot() gives a full-page overview (3 levels deep); snapshot({element}) fully expands one container (dropdown, dialog, table, list) — your PRIMARY way to read deep/long content. snapshot({element, n}) expands n levels.
   • screenshot() — capture the viewport as a JPEG (layout context).
   • extract({selector?, mode?}) — the FALLBACK when snapshot is truncated or the DOM is empty/uninformative. mode="map" (default) flattens the page (or a scoped region) to a compact one-line-per-element list; mode="text" returns the full readable page text for prose/tables/prices.
-  • list_tabs() — list the open browser tabs (you cannot switch to them in watch mode).
-  • generate_file({filename, content}) — package extracted data into a downloadable .csv/.json/.md file for the user.
+  • navigate({url}) — go to a URL. The user is asked for read access to sites you haven't been allowed to read.
+  • follow_link({selector, newTab?}) — open a link (<a href>) by its URL, without clicking. This is how you browse: use refs of links from the latest snapshot. Buttons and JS-driven items can't be followed — note them in your plan instead.
+  • list_tabs() / switch_tab({tabId}) — list open tabs and make another one the active tab.
+  • generate_file({filename, content}) — package extracted data into a downloadable .csv/.json/.md file.
+  • propose_plan({goal, sites, steps, bulk?}) — present an action plan for the user to approve. This ENDS your turn.
 
-The first message already includes a fresh snapshot of the current page — read it first. Use snapshot({element}) drill-in for long lists/tables before falling back to extract().
+The first message already includes a fresh snapshot of the current page — read it first. After navigate/follow_link/switch_tab, snapshot() before reading.
 
 RULES:
-- Answer from what's on the page. Format your answer to fit the task (list → list, yes/no → brief, table → markdown). Never compress a list into a count unless asked.
-- You are read-only. If the user asks you to DO something on the page (click, fill a form, buy, navigate, log in, send, etc.), do NOT attempt it — explain that you're in watch mode (read-only) and ask them to switch to "ask before acting" or "act on allowlist" mode in the composer, then stop.
+- If the user asks a QUESTION (about this page or something you can find by browsing), answer it directly in text. Format your answer to fit the task (list → list, yes/no → brief, table → markdown). Never compress a list into a count unless asked.
+- If the task needs ACTIONS (clicking, filling forms, sending, buying, labeling, deleting…), do not attempt them. Explore just enough to make a concrete plan: find the right pages/URLs, the exact visible labels of the buttons, menus and fields involved, and — for repetitive work — the full list of items. Then call propose_plan ONCE and stop.
+- Plan steps are concrete and imperative: each names the site/page and the exact element labels ("in gmail, open the 'Promotions' tab", "click 'Label as' and pick 'news'"). Don't pad with snapshot/read steps.
+- \`sites\` = every host the plan will act on (e.g. "mail.google.com"). Approving the plan grants act access on exactly these for the run.
+- For repetitive work over many items, put the per-item action in \`bulk\` with the complete item list (it may be executed as a script).
+- If the user replies with changes to a plan, explore further if needed and call propose_plan again with the revised plan.
+- Never follow links that log out, unsubscribe, delete, or confirm something — they are refused.
 - Use the datetime/location context to produce accurate results.`;
-
-const PLAN_SYSTEM = `You are DODO's planner. The orchestrator agent asks you to draft a deterministic action script for a specific multi-step browser sub-task.
-
-Reply with ONLY a JSON object with keys:
-- "sites": string[] — hosts (no scheme) the script will touch.
-- "steps": string[] — 2-6 human-readable imperative steps, lowercase, no numbering, no trailing periods.
-- "script": array of step objects — the exact action sequence.
-- "explanation": string — one-sentence summary of what this script will accomplish.
-
-Script step formats:
-  {"action":"navigate","url":"https://..."}
-  {"action":"snapshot"}
-  {"action":"click","target":{...},"description":"why"}
-  {"action":"type","target":{...},"text":"value"}
-  {"action":"extract"}
-
-Target objects describe the element with visible properties — never invent CSS selectors:
-  text: visible button/link label
-  aria: aria-label value
-  placeholder: input placeholder
-  role: ARIA role (button, link, textbox…)
-  type: HTML input type (email, text, search…)
-
-Rules:
-- After every navigate step, add a snapshot step before any click/type.
-- If the task starts on the current page (shown in pageContext), you may omit the first navigate and start with a snapshot.
-- Use at least one property per target; more is better.
-- Only navigate to hosts listed in "sites".
-- When the task requires reading data (prices, results, names, content), add an extract step before the script ends.
-- Scripts end naturally when the last step runs — do NOT emit a "done" step.`;
 
 async function getApproxLocation(): Promise<string> {
   try {
@@ -202,16 +210,20 @@ class Agent {
   // In-memory permission grants that last only for the CURRENT run (cleared when control returns to
   // the user — see complete/fail/stop/reset). Same match semantics as the persisted allowlist.
   private sessionGrants: AllowlistEntry[] = [];
+  // An "allow once" grant: covers the host it was given for until the agent next moves (navigate,
+  // follow_link, tab switch/follow) or the run ends — so a once-approved navigation isn't followed by
+  // a second prompt for the snapshot of the very page it just opened.
+  private onceGrant: { host: string; access: AccessLevel } | null = null;
   private conversation: ChatMessage[] = [];
   // Per-turn record of the exact (post-prune) payload sent to the provider, for dodoExport.
   // The live conversation is the cumulative store; this captures what each request actually carried.
   private requestLog: { turn: number; at: string; model: string; chars: number; messages: ChatMessage[] }[] = [];
   private taskId: string | null = null;
   private firstUserText: string | null = null; // used as the history row title
-  private lastSystemPrompt: string = EXEC_SYSTEM; // the prompt the most recent run used (EXEC or WATCH) — for dodoExport
+  private lastSystemPrompt: string = EXEC_SYSTEM; // the prompt the most recent run used (EXEC or PLAN_MODE) — for dodoExport
   private lastMode: Mode | null = null; // the mode the previous message ran under — to flag mid-chat mode switches
   private runSettings: Settings | null = null; // settings snapshot for the current run — avoids a getSettings() round-trip per tool dispatch
-  private watching = false; // true for the duration of a watch-mode run — enforced at dispatch, not just via the system prompt
+  private planning = false; // true for the duration of a plan-mode run — enforced at dispatch, not just via the system prompt
 
   constructor() {
     this.ready = this.loadSavedState();
@@ -380,24 +392,17 @@ class Agent {
     }
   }
 
+  private isIdle(): boolean {
+    return this.state.phase === 'idle' || this.state.phase === 'complete' || this.state.phase === 'error';
+  }
+
   async sendMessage(text: string) {
     if (!text.trim()) return;
-    const acceptablePhase =
-      this.state.phase === 'idle'
-      || this.state.phase === 'complete'
-      || this.state.phase === 'error';
-    if (!acceptablePhase) {
+    if (!this.isIdle()) {
       log.warn('sendMessage ignored — agent busy', this.state.phase);
       return;
     }
     log.info('user message', { text, hasConversation: this.conversation.length > 0 });
-    this.aborted = false;
-
-    if (!this.taskId) {
-      this.taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      this.firstUserText = text;
-      this.setState({ startedAt: Date.now() });
-    }
 
     // Flag a mid-chat permission-mode switch to the MODEL ONLY (invisible to the user): if the user
     // changed the mode since the previous message, the LLM context for this message gets a banner so
@@ -405,11 +410,27 @@ class Agent {
     const mode = (await getSettings()).defaultMode;
     const modeChanged = this.lastMode !== null && this.lastMode !== mode;
     this.lastMode = mode;
+    const banner = modeChanged
+      ? `[MODE CHANGED] The user just switched to "${MODE_LABEL[mode]}" mode${mode === 'plan' ? ' — you are now read-only: you may browse, but must not click/type/press; propose a plan for anything that needs acting' : ''}. This applies to this and following messages.`
+      : '';
+    await this.startRun(text, text, banner);
+  }
+
+  // Shared start of a run (a user message, or an approved plan): records the user turn — `uiText` in
+  // the chat, `taskText` + page context for the model — pins the tab on the first turn, and runs the loop.
+  private async startRun(uiText: string, taskText: string, banner: string) {
+    this.aborted = false;
+
+    if (!this.taskId) {
+      this.taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      this.firstUserText = uiText;
+      this.setState({ startedAt: Date.now() });
+    }
 
     // Build context block — page snapshot, datetime, location. Reused on first turn and follow-ups.
-    const enriched = await this.buildUserContext(text, modeChanged ? mode : undefined);
+    const enriched = await this.buildUserContext(taskText, banner);
     this.conversation.push({ role: 'user', parts: [{ type: 'text', text: enriched }] });
-    this.pushMessage({ id: newId('msg'), kind: 'user', text, t: Date.now() });
+    this.pushMessage({ id: newId('msg'), kind: 'user', text: uiText, t: Date.now() });
 
     // Pin active tab once at conversation start.
     if (this.conversation.length === 1) {
@@ -428,7 +449,7 @@ class Agent {
     await this.runLoop();
   }
 
-  private async buildUserContext(text: string, switchedToMode?: Mode): Promise<string> {
+  private async buildUserContext(text: string, banner: string): Promise<string> {
     const tab = await getActiveTab().catch(() => null);
     const datetime = new Date().toISOString();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -442,7 +463,7 @@ class Agent {
       // it for a non-allowlisted host rather than shipping its DOM to the LLM before permission has
       // been granted; the agent will prompt for permission as soon as it needs to act on the page.
       const host = hostFromUrl(tab.url);
-      const allowed = !host || matchesAllowlist(tab.url, host, this.sessionGrants) || await isAllowed(tab.url);
+      const allowed = !host || this.hasRunGrant(tab.url, host, 'read') || await isAllowed(tab.url, 'read');
       if (!allowed) {
         pageContext = `(page not snapshotted — ${host} is not in the allowlist yet; permission will be requested before the agent reads or acts on it)`;
       } else {
@@ -457,9 +478,7 @@ class Agent {
     }
 
     const header = this.conversation.length === 0 ? 'TASK' : 'FOLLOW-UP';
-    const modeBanner = switchedToMode
-      ? `[MODE CHANGED] The user just switched to "${MODE_LABEL[switchedToMode]}" mode${switchedToMode === 'watch' ? ' — you are now read-only and must not act on the page' : ''}. This applies to this and following messages.\n\n`
-      : '';
+    const modeBanner = banner ? `${banner}\n\n` : '';
     return `${modeBanner}${header}: ${text}\n\nCURRENT PAGE:\n${pageContext}\n\nCONTEXT:\nDatetime: ${datetime}\nTimezone: ${timezone}${location ? `\nLocation: ${location}` : ''}`;
   }
 
@@ -485,6 +504,54 @@ class Agent {
     this.resolveExecution = null;
   }
 
+  // Run an approved plan: switch to the chosen act mode, grant act access on the plan's sites for this
+  // run (session grants are cleared when it ends), and hand the plan to the model as the next turn.
+  async approvePlan(messageId: string, mode: Exclude<Mode, 'plan'>) {
+    const plan = this.state.messages.find((m) => m.id === messageId);
+    if (!this.isIdle() || plan?.kind !== 'plan_proposal' || plan.status !== 'pending') {
+      log.warn('approvePlan ignored — no matching pending plan', this.state.phase);
+      return;
+    }
+    log.info('approvePlan', { messageId, mode, sites: plan.sites });
+    await saveSettings({ defaultMode: mode });
+    this.updateMessage(messageId, {
+      status: 'approved',
+      stepStatus: plan.steps.map((): PlanStepStatus => 'todo'),
+    } as Partial<UIMessage>);
+    for (const site of plan.sites ?? []) {
+      const pattern = domainPatternOf(site);
+      if (!this.sessionGrants.some((e) => e.pattern === pattern && e.scope === 'domain' && e.access === 'act')) {
+        this.sessionGrants.push({ pattern, scope: 'domain', access: 'act' });
+      }
+    }
+    this.lastMode = mode;
+    const sites = plan.sites?.length ? plan.sites.join(', ') : '(none listed)';
+    const banner = `[PLAN APPROVED — mode "${MODE_LABEL[mode]}"] The user approved your plan. You are no longer in plan mode: you may now act (click/type/press/execute_actions). You have act access on: ${sites}. Other sites will prompt the user.`;
+    await this.startRun('▶ run approved plan', `Execute the approved plan now.\n${formatPlan(plan.goal, plan.steps, plan.bulk)}\nCall update_plan({step, status}) right after finishing each step.`, banner);
+  }
+
+  async rejectPlan(messageId: string) {
+    const plan = this.state.messages.find((m) => m.id === messageId);
+    if (plan?.kind !== 'plan_proposal' || plan.status !== 'pending') return;
+    this.updateMessage(messageId, { status: 'rejected' } as Partial<UIMessage>);
+    // Model-only note so the next turn knows the plan was turned down (Gemini folds it into the next
+    // user message — see toGeminiContents).
+    this.conversation.push({ role: 'user', parts: [{ type: 'text', text: '[the user rejected the proposed plan — do not execute it]' }] });
+    void this.persistSnapshot(this.state.phase === 'error' ? 'error' : 'done');
+  }
+
+  // Grants that live only for the current run: session grants, plus the narrower "allow once" grant.
+  private hasRunGrant(url: string, host: string, need: AccessLevel): boolean {
+    if (matchesAllowlist(url, host, this.sessionGrants, need)) return true;
+    const once = this.onceGrant;
+    return !!once && once.host === host && (need === 'read' || once.access === 'act');
+  }
+
+  private clearRunGrants() {
+    this.sessionGrants = [];
+    this.onceGrant = null;
+  }
+
   // Halt the current step but keep the conversation alive so the user can follow up.
   // For a full wipe (new chat), call reset() — bound to the panel's "new task" button.
   async stop() {
@@ -493,7 +560,7 @@ class Agent {
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
     if (this.resolveCritical) { this.resolveCritical(false); this.resolveCritical = null; }
-    this.sessionGrants = []; // run is ending — session grants don't outlive it
+    this.clearRunGrants(); // run is ending — session grants don't outlive it
     const wasRunning = this.taskId
       && this.state.phase !== 'idle' && this.state.phase !== 'complete' && this.state.phase !== 'error';
     await setTabWorking(getPinnedTabId(), false); // await — see complete()
@@ -536,7 +603,7 @@ class Agent {
     this.requestLog = [];
     this.taskId = null;
     this.firstUserText = null;
-    this.sessionGrants = [];
+    this.clearRunGrants();
     this.lastMode = null;
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
@@ -559,7 +626,7 @@ class Agent {
     if (this.resolvePermission) { this.resolvePermission(false); this.resolvePermission = null; }
     if (this.resolveExecution) { this.resolveExecution(false); this.resolveExecution = null; }
     if (this.resolveCritical) { this.resolveCritical(false); this.resolveCritical = null; }
-    this.sessionGrants = [];
+    this.clearRunGrants();
     this.lastMode = null;
     this.taskId = item.id;
     this.firstUserText = item.title || null;
@@ -587,18 +654,24 @@ class Agent {
   }
 
   // Resolve a pending permission prompt with the user's chosen scope (page/domain) + duration
-  // (once/session/always). `once` grants nothing persistent; `session` lives for this run only;
+  // (once/session/always), at the access level the prompt asked for (read in plan mode, act otherwise).
+  // `once` covers the prompted host until the agent next moves; `session` lives for this run only;
   // `always` is written to the allowlist. `pattern` is the host (domain scope) or page key (page scope).
-  async decidePermission(pattern: string, scope: PermissionScope, duration: PermissionDuration) {
-    if (duration !== 'once') {
+  async decidePermission(pattern: string, scope: PermissionScope, duration: PermissionDuration, requested: AccessLevel) {
+    // The level is fixed by the prompt the background raised, not by what the panel sends back.
+    const access = this.state.pendingPermission?.access ?? requested;
+    if (duration === 'once') {
+      const host = this.state.pendingPermission?.host;
+      if (host) this.onceGrant = { host, access };
+    } else {
       // Seed sessionGrants for BOTH 'session' and 'always' so the grant takes effect for the rest of
       // this run regardless of mode. In the default 'ask' mode, ensureAllowed consults only
       // sessionGrants (the persisted allowlist is skipped) — so an 'always' grant that lived solely
       // in the persisted allowlist would re-prompt on the very next action.
-      if (!this.sessionGrants.some((e) => e.pattern === pattern && e.scope === scope)) {
-        this.sessionGrants.push({ pattern, scope });
+      if (!this.sessionGrants.some((e) => e.pattern === pattern && e.scope === scope && e.access === access)) {
+        this.sessionGrants.push({ pattern, scope, access });
       }
-      if (duration === 'always') await addAllowEntry(pattern, scope);
+      if (duration === 'always') await addAllowEntry(pattern, scope, access);
     }
     const pending = this.state.messages.find((m) => m.kind === 'permission_request' && m.status === 'pending');
     if (pending) this.updateMessage(pending.id, { status: 'allowed' } as Partial<UIMessage>);
@@ -618,30 +691,32 @@ class Agent {
     await this.stop();
   }
 
-  // Gate any action on `url`: allowed if a session grant or the persisted allowlist covers it,
-  // otherwise prompt the user and wait for their decision. Returns whether the agent may proceed.
-  private async ensureAllowed(url: string, reason: string): Promise<boolean> {
+  // Gate access to `url` at level `need` (read: view/navigate; act: click/type/press): allowed if a
+  // run grant or the persisted allowlist covers it, otherwise prompt the user and wait for their
+  // decision. Returns whether the agent may proceed.
+  private async ensureAllowed(url: string, reason: string, need: AccessLevel): Promise<boolean> {
     const host = hostFromUrl(url);
     if (!host) return true; // chrome://, about:blank, etc. — nothing to gate
-    if (matchesAllowlist(url, host, this.sessionGrants)) return true;
+    if (this.hasRunGrant(url, host, need)) return true;
     // 'ask' mode ("ask before acting" — see the Mode doc comment in shared/types.ts) does NOT consult
     // the seeded defaults (google.com, github.com, ...) or onboarding domains — those get a fresh
     // prompt each run. It DOES honor entries the user explicitly granted via the "always allow" prompt
     // (isUserAllowed) — "always allow" has to mean don't-ask-again even in ask mode, or the button is
-    // meaningless. 'auto' mode honors the whole persisted allowlist. 'watch' mode never reaches here —
-    // actions are refused before dispatch (see dispatchToolCall).
+    // meaningless. 'auto' and 'plan' honor the whole persisted allowlist (plan only ever needs read).
     const mode = this.runSettings?.defaultMode ?? (await getSettings()).defaultMode;
-    const allowed = mode === 'ask' ? await isUserAllowed(url) : await isAllowed(url);
+    const allowed = mode === 'ask' ? await isUserAllowed(url, need) : await isAllowed(url, need);
     if (allowed) return true;
-    return this.waitForPermission(url, reason);
+    // Plan mode asks only for what it can use (read). Act modes ask straight for act — it covers
+    // reading too, so a new site costs one prompt rather than a read prompt then an act prompt.
+    return this.waitForPermission(url, reason, mode === 'plan' ? 'read' : 'act');
   }
 
-  private waitForPermission(url: string, reason: string): Promise<boolean> {
+  private waitForPermission(url: string, reason: string, access: AccessLevel): Promise<boolean> {
     const host = hostFromUrl(url);
     const pageKey = pageKeyFromUrl(url);
-    this.pushMessage({ id: newId('perm'), kind: 'permission_request', host, url, pageKey, reason, status: 'pending', t: Date.now() });
-    this.setState({ phase: 'awaiting_permission', pendingPermission: { host, url, pageKey, reason } });
-    notify('dodo · needs you', `permission required for ${host}`);
+    this.pushMessage({ id: newId('perm'), kind: 'permission_request', host, url, pageKey, reason, access, status: 'pending', t: Date.now() });
+    this.setState({ phase: 'awaiting_permission', pendingPermission: { host, url, pageKey, reason, access } });
+    notify('dodo · needs you', `${access} permission required for ${host}`);
     return new Promise<boolean>((resolve) => { this.resolvePermission = resolve; });
   }
 
@@ -671,7 +746,7 @@ class Agent {
     this.resolveCritical = null;
   }
 
-  private waitForCriticalConfirmation(action: 'click' | 'type' | 'press', label: string, reason: string): Promise<boolean> {
+  private waitForCriticalConfirmation(action: CriticalAction, label: string, reason: string): Promise<boolean> {
     const messageId = newId('crit');
     this.pushMessage({ id: messageId, kind: 'critical_confirm', action, label, reason, status: 'pending', t: Date.now() });
     this.setState({ phase: 'awaiting_critical', pendingCritical: { messageId }, workingLabel: 'awaiting confirmation' });
@@ -691,13 +766,13 @@ class Agent {
     const provider = getProvider(settings.providerId);
     if (!settings.apiKey) return this.fail('no api key configured — open settings to add your api key');
 
-    // Watch mode: a read-only system prompt tells the model it can only inspect/answer, and
-    // dispatchToolCall refuses any non-read-only tool at the dispatch boundary (see `this.watching`).
-    // The tool SCHEMA itself is always the full set, regardless of mode — a conversation that
-    // switches modes mid-chat would otherwise carry history containing function calls for tools no
-    // longer declared in the current request, which providers may reject or mishandle.
-    this.watching = settings.defaultMode === 'watch';
-    const systemPrompt = this.watching ? WATCH_SYSTEM : EXEC_SYSTEM;
+    // Plan mode: a read-only system prompt tells the model it can only browse/answer/propose, and
+    // dispatchToolCall refuses anything outside PLAN_MODE_TOOLS at the dispatch boundary (see
+    // `this.planning`). The tool SCHEMA itself is always the full set, regardless of mode — a
+    // conversation that switches modes mid-chat would otherwise carry history containing function
+    // calls for tools no longer declared in the current request, which providers may reject or mishandle.
+    this.planning = settings.defaultMode === 'plan';
+    const systemPrompt = this.planning ? PLAN_MODE_SYSTEM : EXEC_SYSTEM;
     this.lastSystemPrompt = systemPrompt;
 
     let emptyTurns = 0;
@@ -768,6 +843,7 @@ class Agent {
 
       const toolReplies: ContentPart[] = [];
       let abortedMidBatch = false;
+      let endRun = false;
       for (const call of res.calls) {
         if (this.aborted) {
           // Fill remaining calls with synthetic error replies so the conversation
@@ -780,7 +856,8 @@ class Agent {
           continue;
         }
         const name = call.name as ToolName;
-        const { result, isError, screenshotBase64 } = await this.dispatchToolCall(name, call.id, call.args);
+        const { result, isError, screenshotBase64, ends } = await this.dispatchToolCall(name, call.id, call.args);
+        if (ends) endRun = true;
 
         if (screenshotBase64) {
           toolReplies.push({
@@ -805,6 +882,8 @@ class Agent {
       void this.persistSnapshot('running');
 
       if (abortedMidBatch) return;
+      // propose_plan hands control back to the user — no closing LLM turn needed.
+      if (endRun) return this.complete('plan ready for your approval');
     }
 
     if (!this.aborted) await this.fail('exceeded max turns');
@@ -814,18 +893,23 @@ class Agent {
     name: ToolName,
     callId: string,
     args: Record<string, unknown>,
-  ): Promise<{ result: unknown; isError: boolean; screenshotBase64?: string }> {
+  ): Promise<{ result: unknown; isError: boolean; screenshotBase64?: string; ends?: boolean }> {
     // Enforced here rather than only via schema filtering: the request always declares the FULL tool
-    // schema now (see runLoop), so a watch-mode model can still technically attempt a mutating call —
+    // schema now (see runLoop), so a plan-mode model can still technically attempt a mutating call —
     // this is the hard boundary that actually stops it from touching the page.
-    if (this.watching && !READ_ONLY_TOOLS.has(name)) {
-      const activityId = newId('act');
+    if (this.planning && !PLAN_MODE_TOOLS.has(name)) {
       this.pushMessage({
-        id: activityId, kind: 'tool_activity', name, args, callId,
-        status: 'error', t: Date.now(), detail: 'blocked — watch mode is read-only',
+        id: newId('act'), kind: 'tool_activity', name, args, callId,
+        status: 'error', t: Date.now(), detail: 'blocked — plan mode is read-only',
       });
       return {
-        result: 'blocked: you are in watch mode (strictly read-only) — this tool cannot be used right now. Tell the user you are read-only and ask them to switch to "ask before acting" or "act on allowlist" mode to perform actions, then stop.',
+        result: 'blocked: you are in read & plan mode (read-only) — you cannot click, type, press or run scripts. If the task needs actions, finish exploring and call propose_plan; the user approves it before anything is executed.',
+        isError: true,
+      };
+    }
+    if (!this.planning && name === 'propose_plan') {
+      return {
+        result: 'propose_plan is only for read & plan mode. You are in an acting mode — carry out the task directly.',
         isError: true,
       };
     }
@@ -837,9 +921,12 @@ class Agent {
       return { result: { ok: true, filename }, isError: false };
     }
 
-    // plan_actions and execute_actions create their own rich UIMessage; granular tools push tool_activity.
-    if (name === 'plan_actions') {
-      return this.handlePlanActions(args);
+    // Plans and scripts render as their own rich UIMessage; granular tools push tool_activity.
+    if (name === 'propose_plan') {
+      return this.handleProposePlan(args);
+    }
+    if (name === 'update_plan') {
+      return this.handleUpdatePlan(args);
     }
     if (name === 'execute_actions') {
       return this.handleExecuteActions(args);
@@ -877,7 +964,7 @@ class Agent {
       if (msg === 'critical_action_denied') {
         // User declined the critical-action confirmation. The run is NOT aborted — tell the model so
         // it can stop and report back rather than retrying the same blocked action.
-        return { result: 'The user declined to confirm this action (it was flagged as a sensitive checkout/payment step). Do not retry it — stop and let the user know you held off.', isError: true };
+        return { result: 'The user declined to confirm this action (it was flagged as sensitive — a checkout/payment step, or a link that logs out/unsubscribes/deletes). Do not retry it — stop and let the user know you held off.', isError: true };
       }
       return { result: msg, isError: true };
     } finally {
@@ -896,6 +983,7 @@ class Agent {
       if (!target || target.id == null) throw new Error(`no tab with id ${args.tabId}`);
       const prev = getPinnedTabId();
       if (prev != null && prev !== target.id) await setTabWorking(prev, false);
+      this.onceGrant = null; // moving to another page — an "allow once" doesn't follow
       pinActiveTab(target.id);
       await chrome.tabs.update(target.id, { active: true }).catch(() => undefined);
       if (target.windowId != null) await chrome.windows.update(target.windowId, { focused: true }).catch(() => undefined);
@@ -919,21 +1007,29 @@ class Agent {
 
     if (name === 'navigate') {
       const url = String(args.url ?? '');
-      const host = hostFromUrl(url);
-      if (!host) throw new Error('invalid url');
-      if (!await this.ensureAllowed(url, `agent wants to navigate to ${host}`)) throw new Error('permission_denied');
-      await navigateTab(tab.id, url);
-      // SPAs fire status:complete on HTML load, not after JS renders content
-      await new Promise<void>((r) => setTimeout(r, 1500));
-      // The reload wiped the content script (and the working-title prefix) — re-apply it.
-      await setTabWorking(tab.id, true);
-      await this.refreshActiveTab();
-      return { ok: true, url };
+      if (!hostFromUrl(url)) throw new Error('invalid url');
+      return this.navigateActiveTab(tab.id, url, url);
     }
 
+    // Reading the current page needs read access; changing it needs act.
+    const need: AccessLevel = ACT_TOOLS.has(name) ? 'act' : 'read';
     const currentHost = tab.url ? hostFromUrl(tab.url) : '';
-    if (currentHost && !await this.ensureAllowed(tab.url ?? '', `agent wants to act on ${currentHost}`)) {
+    if (currentHost && !await this.ensureAllowed(tab.url ?? '', `agent wants to ${need === 'act' ? 'act on' : 'read'} ${currentHost}`, need)) {
       throw new Error('permission_denied');
+    }
+
+    if (name === 'follow_link') {
+      const r = await runContentOp(tab.id, { op: 'resolve_link', selector: String(args.selector ?? '') });
+      if (!r.ok) throw new Error(r.error);
+      const { href, label } = r.data as { href: string; label: string };
+      if (!args.newTab) return this.navigateActiveTab(tab.id, href, label || href);
+      if (!await this.guardNavigation(href, label || href)) throw new Error('critical_action_denied');
+      this.onceGrant = null;
+      if (!await this.ensureAllowed(href, `agent wants to open ${hostFromUrl(href)} in a new tab`, 'read')) throw new Error('permission_denied');
+      const created = await chrome.tabs.create({ url: href, openerTabId: tab.id, active: true });
+      if (created.id == null) throw new Error('could not open a new tab');
+      const opened = await this.followNewTab(created.id);
+      return { ok: true, url: href, tabId: created.id, note: `opened in a new tab, now the active tab: ${opened?.title || '(untitled)'} — snapshot() before reading` };
     }
 
     if (name === 'screenshot') {
@@ -1009,10 +1105,36 @@ class Agent {
     return r.data;
   }
 
+  // Shared by navigate and follow_link: side-effect-URL guard, read gate on the destination, then load.
+  private async navigateActiveTab(tabId: number, url: string, label: string): Promise<unknown> {
+    if (!await this.guardNavigation(url, label)) throw new Error('critical_action_denied');
+    if (this.aborted) throw new Error('aborted');
+    this.onceGrant = null; // a new page — an "allow once" for the previous one doesn't carry over
+    if (!await this.ensureAllowed(url, `agent wants to navigate to ${hostFromUrl(url)}`, 'read')) throw new Error('permission_denied');
+    await navigateTab(tabId, url);
+    // SPAs fire status:complete on HTML load, not after JS renders content
+    await new Promise<void>((r) => setTimeout(r, 1500));
+    // The reload wiped the content script (and the working-title prefix) — re-apply it.
+    await setTabWorking(tabId, true);
+    await this.refreshActiveTab();
+    return { ok: true, url };
+  }
+
+  // A GET to a logout/unsubscribe/delete-shaped URL can change state on its own. Plan mode refuses it
+  // outright (throws, with an explanation for the model); act modes ask the user to confirm first.
+  private async guardNavigation(url: string, label: string): Promise<boolean> {
+    if (!sideEffectPath(url)) return true;
+    if (this.planning) {
+      throw new Error(`refused: ${url} looks like it changes state just by opening it (log out / unsubscribe / delete / confirm…) — plan mode never opens such URLs. If it's part of the task, make it a step in your plan.`);
+    }
+    return this.waitForCriticalConfirmation('navigate', label, 'this link looks like it changes something just by opening it (log out, unsubscribe, delete, confirm…)');
+  }
+
   // If the action just opened a new tab, make it the active tab and tell the model about it.
   private async maybeFollowNewTab(data: unknown): Promise<unknown> {
     const newTabId = consumePendingNewTab();
     if (newTabId == null) return data;
+    this.onceGrant = null;
     const tab = await this.followNewTab(newTabId);
     const note = tab
       ? `A new tab opened and is now the active tab: ${tab.title || '(untitled)'} (${tab.url || ''}). Subsequent tools target it; snapshot() before acting.`
@@ -1040,41 +1162,60 @@ class Agent {
     }
   }
 
-  private async handlePlanActions(args: Record<string, unknown>): Promise<{ result: unknown; isError: boolean }> {
-    const goal = String(args.goal ?? '');
-    const pageContext = String(args.pageContext ?? '');
-    if (!goal) return { result: 'plan_actions requires `goal`', isError: true };
+  // Show a plan card for the user to approve. Ends the run (see runLoop) — approval starts a new one.
+  private async handleProposePlan(args: Record<string, unknown>): Promise<{ result: unknown; isError: boolean; ends?: boolean }> {
+    const goal = String(args.goal ?? '').trim();
+    const steps = Array.isArray(args.steps) ? args.steps.map((s) => String(s).trim()).filter(Boolean) : [];
+    if (!goal || steps.length === 0) return { result: 'propose_plan requires a `goal` and at least one step', isError: true };
 
-    this.setState({ workingLabel: 'planning' });
-    const settings = await getSettings();
-    const provider = getProvider(settings.providerId);
-    try {
-      const res = await provider.chat({
-        apiKey: settings.apiKey,
-        model: settings.model,
-        systemPrompt: PLAN_SYSTEM,
-        messages: [{ role: 'user', parts: [{ type: 'text', text: `GOAL: ${goal}\n\nPAGE CONTEXT:\n${pageContext}` }] }],
-        tools: [],
-        jsonResponse: true,
-      });
-      if (res.kind !== 'text') return { result: 'planner did not return JSON', isError: true };
-      const plan = parsePlan(res.text);
-      if (!plan) {
-        log.warn('plan parse failed', res.text);
-        return { result: 'could not parse plan JSON', isError: true };
-      }
-      this.pushMessage({
-        id: newId('plan'),
-        kind: 'plan_proposal',
-        goal, sites: plan.sites, steps: plan.steps, script: plan.script,
-        explanation: plan.explanation,
-        t: Date.now(),
-      });
-      return { result: { sites: plan.sites, steps: plan.steps, script: plan.script, explanation: plan.explanation }, isError: false };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { result: `plan_actions failed: ${msg}`, isError: true };
+    // Normalize sites to bare hosts; a wildcard-only or junk entry would turn into an over-broad grant.
+    const sites = [...new Set(
+      (Array.isArray(args.sites) ? args.sites : [])
+        .map((s) => String(s).trim().replace(/^\*\./, ''))
+        .map((s) => hostFromUrl(/^https?:\/\//i.test(s) ? s : `https://${s}`).toLowerCase())
+        .filter((h) => h.includes('.') && !h.includes('*')),
+    )];
+    // No sites given → the plan acts on the page it was made from.
+    if (sites.length === 0) {
+      const tab = await getActiveTab().catch(() => null);
+      const host = tab?.url ? hostFromUrl(tab.url) : '';
+      if (host) sites.push(host);
     }
+
+    let bulk: PlanBulk | undefined;
+    const rawBulk = args.bulk as { description?: unknown; items?: unknown } | undefined;
+    if (rawBulk && Array.isArray(rawBulk.items) && rawBulk.items.length > 0) {
+      bulk = { description: String(rawBulk.description ?? ''), items: rawBulk.items.map(String) };
+    }
+
+    // A new proposal replaces any still-pending one.
+    for (const m of this.state.messages) {
+      if (m.kind === 'plan_proposal' && m.status === 'pending') {
+        this.updateMessage(m.id, { status: 'superseded' } as Partial<UIMessage>);
+      }
+    }
+    this.pushMessage({ id: newId('plan'), kind: 'plan_proposal', goal, sites, steps, bulk, status: 'pending', t: Date.now() });
+    return {
+      result: { ok: true, note: 'plan shown to the user — waiting for their approval or changes. Your turn is over.' },
+      isError: false,
+      ends: true,
+    };
+  }
+
+  // Tick a step of the approved plan. Reads the plan from state.messages (not a separate field), so
+  // it keeps working after a service-worker restart.
+  private handleUpdatePlan(args: Record<string, unknown>): { result: unknown; isError: boolean } {
+    const plan = [...this.state.messages].reverse().find((m) => m.kind === 'plan_proposal' && m.status === 'approved');
+    if (plan?.kind !== 'plan_proposal') return { result: 'there is no approved plan to update', isError: true };
+    const step = Number(args.step);
+    if (!Number.isInteger(step) || step < 1 || step > plan.steps.length) {
+      return { result: `step must be 1..${plan.steps.length}`, isError: true };
+    }
+    const status: PlanStepStatus = args.status === 'skipped' || args.status === 'failed' ? args.status : 'done';
+    const stepStatus = [...(plan.stepStatus ?? plan.steps.map((): PlanStepStatus => 'todo'))];
+    stepStatus[step - 1] = status;
+    this.updateMessage(plan.id, { stepStatus } as Partial<UIMessage>);
+    return { result: { ok: true }, isError: false };
   }
 
   private async handleExecuteActions(args: Record<string, unknown>): Promise<{ result: unknown; isError: boolean }> {
@@ -1083,38 +1224,37 @@ class Agent {
       return { result: 'execute_actions requires a non-empty `script` array', isError: true };
     }
     const script = rawScript as ScriptStep[];
+    const expanded = expandScript(script);
+    if ('error' in expanded) return { result: expanded.error, isError: true };
     // A script that contains nothing but snapshots is a no-op — it leaves the page unchanged and returns no
     // extracted text, so the model loops back with the same blind spot. Force it to either act or use the
     // granular snapshot() tool to inspect the page.
-    const hasMutatingStep = script.some(
-      (s) => s.action === 'click' || s.action === 'type' || s.action === 'navigate' || s.action === 'extract',
-    );
-    if (!hasMutatingStep) {
+    if (!expanded.steps.some((s) => s.action !== 'snapshot')) {
       return {
-        result: 'execute_actions script must contain at least one click/type/navigate/extract step. To just inspect the page, call snapshot() directly instead.',
+        result: 'execute_actions script must contain at least one click/type/press/navigate/extract step. To just inspect the page, call snapshot() directly instead.',
         isError: true,
       };
     }
     const rationale = typeof args.rationale === 'string' ? args.rationale : undefined;
 
-    const settings = await getSettings();
+    const settings = this.runSettings ?? await getSettings();
     const initStatus: ExecutionStatus = settings.approvalMode === 'auto_accept' ? 'running' : 'pending_approval';
     const execId = newId('exec');
     this.pushMessage({
-      id: execId, kind: 'execution', script, status: initStatus,
+      id: execId, kind: 'execution', script, expandedCount: expanded.steps.length, status: initStatus,
       rationale, t: Date.now(),
     });
 
     if (settings.approvalMode === 'always_ask') {
       const approved = await this.waitForExecutionApproval(execId);
       if (!approved) {
-        return { result: { status: 'rejected', extracted: '', results: [] }, isError: false };
+        return { result: { status: 'rejected', note: 'the user rejected this script — nothing was run' }, isError: false };
       }
     } else {
       this.setState({ workingLabel: 'executing script' });
     }
 
-    const { results, extracted, ok } = await this.executeScript(execId, script);
+    const { results, extracted, ok, failedItem } = await this.executeScript(execId, expanded.steps, expanded.items);
     const finalStatus: ExecutionStatus = !ok ? 'error' : 'done';
     this.updateMessage(execId, {
       status: finalStatus,
@@ -1123,42 +1263,85 @@ class Agent {
       workingLabel: undefined,
     } as Partial<UIMessage>);
 
+    // Per-step results stay in the card; the model gets a compact summary (a bulk run can be hundreds
+    // of steps) plus where it stopped, so it can resume from the failing item with granular tools.
+    const failed = results.find((r) => r.status === 'error');
     return {
-      result: { status: finalStatus, extracted, results },
+      result: {
+        status: finalStatus,
+        completedSteps: results.filter((r) => r.status === 'ok').length,
+        totalSteps: expanded.steps.length,
+        ...(failed ? { error: failed.error } : {}),
+        ...(failedItem !== undefined ? { failedItem, note: 'items before failedItem are done; continue from failedItem' } : {}),
+        extracted,
+      },
       isError: false,
     };
   }
 
-  private async executeScript(execId: string, initialScript: ScriptStep[]): Promise<{ results: StepResult[]; extracted: string; ok: boolean }> {
-    let script = [...initialScript];
+  private async executeScript(
+    execId: string,
+    initialSteps: FlatScriptStep[],
+    initialItems: (string | undefined)[],
+  ): Promise<{ results: StepResult[]; extracted: string; ok: boolean; failedItem?: string }> {
+    let script = [...initialSteps];
+    let items = [...initialItems]; // the foreach item each step came from (parallel to `script`)
     let lastSnapshot: SnapshotResult | null = null;
     const extractParts: string[] = [];
     const results: StepResult[] = [];
+    const showOverlay = this.runSettings?.showCursorOverlay ?? true;
+    // Pages already cleared for act during this script — ensureAllowed is consulted once per page.
+    const actCleared = new Set<string>();
     let i = 0;
-    let recoveryAttempts = 0;
+    let recoveryAttempts = 0; // for the current step
+    let totalRepairs = 0;     // across the whole script
+
+    const done = (ok: boolean, failedItem?: string) => ({ results, extracted: extractParts.join('\n\n'), ok, failedItem });
+    const failAt = (action: StepResult['action'], error: string) => {
+      const item = items[i];
+      results.push({ action, status: 'error', error: item !== undefined ? `${error} (item: ${item})` : error });
+      return done(false, item);
+    };
+    // Act gate for the page the step will run on. Throws 'permission_denied' if the user refuses.
+    const actTab = async (): Promise<number> => {
+      const tab = await getActiveTab();
+      if (!tab?.id) throw new Error('no active tab');
+      const url = tab.url ?? '';
+      const key = pageKeyFromUrl(url) || url;
+      if (!actCleared.has(key)) {
+        if (!await this.ensureAllowed(url, `script wants to act on ${hostFromUrl(url)}`, 'act')) throw new Error('permission_denied');
+        actCleared.add(key);
+      }
+      return tab.id;
+    };
+    // Replace the failing step with LLM-repaired steps (the rest of the script is kept).
+    const repair = async (step: FlatScriptStep, snap: SnapshotResult | null): Promise<boolean> => {
+      if (!snap || ++recoveryAttempts > 3 || ++totalRepairs > 10) return false;
+      const repaired = await this.recoverStep(step, snap, script.slice(i + 1, i + 6));
+      if (!repaired) return false;
+      script = [...script.slice(0, i), ...repaired, ...script.slice(i + 1)];
+      items = [...items.slice(0, i), ...repaired.map(() => items[i]), ...items.slice(i + 1)];
+      lastSnapshot = snap;
+      return true;
+    };
 
     while (i < script.length && !this.aborted) {
       const step = script[i];
-      this.updateMessage(execId, { workingLabel: step.action } as Partial<UIMessage>);
+      this.updateMessage(execId, { workingLabel: items[i] !== undefined ? `${step.action} · ${items[i]}` : step.action } as Partial<UIMessage>);
 
-      if ((step.action === 'click' || step.action === 'type') && !lastSnapshot) {
+      const needsTarget = step.action === 'click' || step.action === 'type' || (step.action === 'press' && !!step.target);
+      if (needsTarget && !lastSnapshot) {
         lastSnapshot = await this.doSnapshotForScript();
-        if (!lastSnapshot) {
-          results.push({ action: step.action, status: 'error', error: 'snapshot failed before interaction' });
-          return { results, extracted: extractParts.join('\n\n'), ok: false };
-        }
+        if (!lastSnapshot) return failAt(step.action, 'snapshot failed before interaction');
         continue;
       }
 
       try {
         if (step.action === 'navigate') {
-          const host = hostFromUrl(step.url);
-          if (!host) throw new Error('invalid url');
-          if (!await this.ensureAllowed(step.url, `agent wants to navigate to ${host}`)) throw new Error('permission_denied');
           const tab = await getActiveTab();
           if (!tab?.id) throw new Error('no active tab');
-          await navigateTab(tab.id, step.url);
-          await new Promise<void>((r) => setTimeout(r, 2000));
+          if (!hostFromUrl(step.url)) throw new Error(`invalid url: ${step.url}`);
+          await this.navigateActiveTab(tab.id, step.url, step.url);
           lastSnapshot = null;
           recoveryAttempts = 0;
           results.push({ action: 'navigate', status: 'ok' });
@@ -1166,62 +1349,45 @@ class Agent {
 
         } else if (step.action === 'snapshot') {
           lastSnapshot = await this.doSnapshotForScript();
-          if (!lastSnapshot) {
-            results.push({ action: 'snapshot', status: 'error', error: 'snapshot failed' });
-            return { results, extracted: extractParts.join('\n\n'), ok: false };
-          }
+          if (!lastSnapshot) return failAt('snapshot', 'snapshot failed');
           recoveryAttempts = 0;
           results.push({ action: 'snapshot', status: 'ok' });
           i++;
 
-        } else if (step.action === 'click' || step.action === 'type') {
-          const selector = resolveTarget(step.target, lastSnapshot!.elements, step.action);
-          if (!selector) {
-            if (++recoveryAttempts > 3) {
-              results.push({ action: step.action, status: 'error', error: `no element matched after recovery: ${step.description ?? JSON.stringify(step.target)}` });
-              return { results, extracted: extractParts.join('\n\n'), ok: false };
+        } else if (step.action === 'click' || step.action === 'type' || step.action === 'press') {
+          let selector: string | undefined;
+          if (step.action !== 'press' || step.target) {
+            const target = step.target;
+            if (!target || typeof target !== 'object') return failAt(step.action, `${step.action} step needs a \`target\``);
+            selector = resolveTarget(target, lastSnapshot!.elements, step.action === 'type' ? 'type' : 'click') ?? undefined;
+            if (!selector) {
+              if (await repair(step, lastSnapshot)) continue;
+              return failAt(step.action, `no element matched: ${step.description ?? JSON.stringify(target)}`);
             }
-            const repaired = await this.recoverScript(step, lastSnapshot!, script.slice(i));
-            if (!repaired) {
-              results.push({ action: step.action, status: 'error', error: `no element matched: ${step.description ?? JSON.stringify(step.target)}` });
-              return { results, extracted: extractParts.join('\n\n'), ok: false };
-            }
-            script = [...script.slice(0, i), ...repaired];
-            continue;
           }
+          if (step.action === 'press' && !step.key) return failAt('press', 'press step needs a `key`');
 
-          const tab = await getActiveTab();
-          if (!tab?.id) throw new Error('no active tab');
+          const tabId = await actTab();
           const op = step.action === 'type'
-            ? await runContentOp(tab.id, { op: 'type', selector, text: step.text })
-            : await runContentOp(tab.id, { op: 'click', selector });
+            ? await runContentOp(tabId, { op: 'type', selector: selector!, text: step.text, showOverlay })
+            : step.action === 'press'
+              ? await runContentOp(tabId, { op: 'press', key: step.key, selector, showOverlay })
+              : await runContentOp(tabId, { op: 'click', selector: selector!, showOverlay });
 
           if (!op.ok) {
-            // A checkout/payment-shaped step the guardrail flagged — this scripted-execution path has
-            // no confirmation UI wired up (it's disabled today; see PLANNER_TOOL_SCHEMAS), so treat it
-            // as a hard stop rather than letting recovery retry/rewrite around the block.
+            // A checkout/payment-shaped step the guardrail flagged. Scripts don't pause for
+            // confirmation mid-batch — hard stop, and let the model redo it with the granular tools
+            // (which do run the confirmation flow).
             if (op.critical) {
-              results.push({ action: step.action, status: 'error', error: `blocked: ${op.critical.reason} — sensitive actions require the granular tools' confirmation flow, not a script.` });
-              return { results, extracted: extractParts.join('\n\n'), ok: false };
+              return failAt(step.action, `blocked: ${op.critical.reason} — sensitive actions require the granular tools' confirmation flow, not a script`);
             }
-            if (++recoveryAttempts > 3) {
-              results.push({ action: step.action, status: 'error', error: op.error ?? 'action failed' });
-              return { results, extracted: extractParts.join('\n\n'), ok: false };
-            }
-            const fresh = await this.doSnapshotForScript();
-            const repaired = fresh ? await this.recoverScript(step, fresh, script.slice(i)) : null;
-            if (!repaired) {
-              results.push({ action: step.action, status: 'error', error: op.error ?? 'action failed' });
-              return { results, extracted: extractParts.join('\n\n'), ok: false };
-            }
-            script = [...script.slice(0, i), ...repaired];
-            lastSnapshot = fresh;
-            continue;
+            if (await repair(step, await this.doSnapshotForScript())) continue;
+            return failAt(step.action, op.error ?? 'action failed');
           }
 
           // Let the page settle — clicks that open dropdowns, menus, or dialogs need a beat
           // before the next snapshot, otherwise the new overlay items aren't in the DOM yet.
-          if (step.action === 'click') {
+          if (step.action !== 'type') {
             await new Promise<void>((r) => setTimeout(r, 350));
           }
           results.push({ action: step.action, status: 'ok' });
@@ -1231,14 +1397,11 @@ class Agent {
 
         } else if (step.action === 'extract') {
           const tab = await getActiveTab();
-          if (tab?.id) {
-            const r = await runContentOp(tab.id, { op: 'extract' });
-            const data = r.ok && r.data ? (r.data as { text?: string }) : null;
-            if (data?.text) extractParts.push(data.text);
-            results.push({ action: 'extract', status: r.ok ? 'ok' : 'error', error: !r.ok ? r.error : undefined });
-          } else {
-            results.push({ action: 'extract', status: 'error', error: 'no active tab' });
-          }
+          if (!tab?.id) return failAt('extract', 'no active tab');
+          const r = await runContentOp(tab.id, { op: 'extract', mode: 'text' });
+          const data = r.ok && r.data ? (r.data as { text?: string }) : null;
+          if (data?.text) extractParts.push(items[i] !== undefined ? `## ${items[i]}\n${data.text}` : data.text);
+          results.push({ action: 'extract', status: r.ok ? 'ok' : 'error', error: !r.ok ? r.error : undefined });
           i++;
 
         } else {
@@ -1246,26 +1409,15 @@ class Agent {
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (msg === 'permission_denied') {
-          results.push({ action: step.action, status: 'error', error: 'permission denied' });
-          return { results, extracted: extractParts.join('\n\n'), ok: false };
-        }
-        if (++recoveryAttempts > 3) {
-          results.push({ action: step.action, status: 'error', error: `threw: ${msg}` });
-          return { results, extracted: extractParts.join('\n\n'), ok: false };
-        }
-        const fresh = await this.doSnapshotForScript();
-        const repaired = fresh ? await this.recoverScript(step, fresh, script.slice(i)) : null;
-        if (!repaired) {
-          results.push({ action: step.action, status: 'error', error: msg });
-          return { results, extracted: extractParts.join('\n\n'), ok: false };
-        }
-        script = [...script.slice(0, i), ...repaired];
-        lastSnapshot = fresh;
+        if (msg === 'permission_denied') return failAt(step.action, 'permission denied');
+        if (msg === 'critical_action_denied') return failAt(step.action, 'the user declined to open a state-changing link');
+        if (msg === 'aborted') break;
+        if (await repair(step, await this.doSnapshotForScript())) continue;
+        return failAt(step.action, `threw: ${msg}`);
       }
     }
 
-    return { results, extracted: extractParts.join('\n\n'), ok: true };
+    return done(!this.aborted);
   }
 
   private async doSnapshotForScript(): Promise<SnapshotResult | null> {
@@ -1276,33 +1428,35 @@ class Agent {
     return r.data as SnapshotResult;
   }
 
-  private async recoverScript(
-    failedStep: ScriptStep,
+  // Ask the model for steps that replace ONE failed step (the rest of the script stays as is — for a
+  // bulk run the remainder can be hundreds of steps). Returns null if it can't produce valid steps.
+  private async recoverStep(
+    failedStep: FlatScriptStep,
     snapshot: SnapshotResult,
-    remainingSteps: ScriptStep[],
-  ): Promise<ScriptStep[] | null> {
-    const settings = await getSettings();
+    nextSteps: FlatScriptStep[],
+  ): Promise<FlatScriptStep[] | null> {
+    const settings = this.runSettings ?? await getSettings();
     const provider = getProvider(settings.providerId);
 
-    const elementSummary = (snapshot.elements ?? []).slice(0, 60).map((e) =>
+    const elementSummary = (snapshot.elements ?? []).slice(0, 80).map((e) =>
       [e.tag, e.selector, e.text ? `text="${e.text}"` : '', e.aria ? `aria="${e.aria}"` : '',
        e.placeholder ? `ph="${e.placeholder}"` : '', e.role ? `role="${e.role}"` : '',
        e.type ? `type="${e.type}"` : ''].filter(Boolean).join(' ')
     ).join('\n');
 
-    const prompt = `You are repairing a browser automation script. A step failed because no element matched.
+    const prompt = `You are repairing a browser automation script. One step failed — no element matched, or the action errored.
 
 FAILED STEP: ${JSON.stringify(failedStep)}
 
 CURRENT PAGE (${snapshot.url}):
 ${elementSummary}
 
-REMAINING STEPS (must still be completed):
-${JSON.stringify(remainingSteps, null, 2)}
+THE NEXT STEPS (they will run after your replacement, unchanged):
+${JSON.stringify(nextSteps, null, 2)}
 
-Output ONLY a JSON array of script steps to replace the failed step and complete the remaining work.
-Use real text/aria/placeholder values visible in the snapshot above for targets.
-If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
+Output ONLY a JSON array of 1-5 steps that accomplish what the failed step intended, so the next steps can run.
+Step formats: {"action":"navigate","url"}, {"action":"snapshot"}, {"action":"click","target":{...}}, {"action":"type","target":{...},"text"}, {"action":"press","key","target"?}, {"action":"extract"}.
+Use real text/aria/placeholder values visible in the page above for targets. If the intended element genuinely isn't there, output [].`;
 
     try {
       const res = await provider.chat({
@@ -1314,8 +1468,11 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
         jsonResponse: true,
       });
       if (res.kind !== 'text') return null;
-      const parsed = JSON.parse(res.text.trim());
-      return Array.isArray(parsed) ? (parsed as ScriptStep[]) : null;
+      const parsed = JSON.parse(res.text.trim()) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 5) return null;
+      const valid = parsed.filter((s): s is FlatScriptStep =>
+        !!s && typeof s === 'object' && FLAT_ACTIONS.has((s as { action?: string }).action ?? ''));
+      return valid.length === parsed.length ? valid : null;
     } catch { return null; }
   }
 
@@ -1354,15 +1511,15 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
     };
   }
 
-  private async complete() {
+  private async complete(notice = 'task complete') {
     log.info('complete');
-    this.sessionGrants = []; // run ended — session grants don't carry into the next message
+    this.clearRunGrants(); // run ended — session grants don't carry into the next message
     // Await so the MV3 service worker stays alive until the content script has cleared the working
     // indicator + faded the on-page cursor overlay; a fire-and-forget `void` here can be dropped if
     // the worker suspends right after the run ends (the overlay would then never hide).
     await setTabWorking(getPinnedTabId(), false);
     this.setState({ phase: 'complete', workingLabel: undefined });
-    notify('dodo · done', 'task complete');
+    notify('dodo · done', notice);
     // Await both writes so the completed state (incl. the assistant message) is durable before the
     // worker can suspend — otherwise a reload restores a stale mid-loop snapshot shown as "halted".
     await Promise.all([this.persistActiveState(), this.persistSnapshot('done')]);
@@ -1370,7 +1527,7 @@ If the page changed unexpectedly, add navigate/snapshot steps as needed.`;
 
   private async fail(msg: string) {
     log.err('fail', msg);
-    this.sessionGrants = []; // run ended — session grants don't carry into the next message
+    this.clearRunGrants(); // run ended — session grants don't carry into the next message
     await setTabWorking(getPinnedTabId(), false); // await — see complete()
     // Render the error solely through the phase:'error' ErrorBanner ("halted" + retry) in Chat.tsx.
     // Don't also pushMessage a kind:'error' entry — that produced a duplicate red box above the banner.
@@ -1386,22 +1543,57 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + '…';
 }
 
-function parsePlan(text: string): Plan | null {
-  let s = text.trim();
-  const fence = s.match(/```(?:json)?\s*([\s\S]+?)```/);
-  if (fence) s = fence[1].trim();
-  try {
-    const obj = JSON.parse(s) as Record<string, unknown>;
-    if (Array.isArray(obj.steps) && Array.isArray(obj.script)) {
-      return {
-        sites: Array.isArray(obj.sites) ? (obj.sites as unknown[]).map(String) : [],
-        steps: (obj.steps as unknown[]).map(String),
-        script: obj.script as ScriptStep[],
-        explanation: typeof obj.explanation === 'string' ? obj.explanation : undefined,
-      };
+// The approved plan as the model sees it when asked to execute it.
+function formatPlan(goal: string, steps: string[], bulk?: PlanBulk): string {
+  const lines = [`Goal: ${goal}`, 'Steps:', ...steps.map((s, i) => `${i + 1}. ${s}`)];
+  if (bulk) lines.push(`Bulk (${bulk.items.length} items): ${bulk.description}`, ...bulk.items.map((it) => `  - ${it}`));
+  return lines.join('\n');
+}
+
+// Bulk limits for execute_actions — past these, the model is told to split into batches.
+const MAX_FOREACH_ITEMS = 100;
+const MAX_EXPANDED_STEPS = 400;
+const FLAT_ACTIONS = new Set<string>(['navigate', 'snapshot', 'click', 'type', 'press', 'extract']);
+
+// Flatten foreach steps into a plain step list, substituting `{{item}}`. `items[i]` is the foreach
+// item step i came from (undefined for top-level steps) — used to report where a bulk run stopped.
+function expandScript(script: ScriptStep[]): { steps: FlatScriptStep[]; items: (string | undefined)[] } | { error: string } {
+  const steps: FlatScriptStep[] = [];
+  const items: (string | undefined)[] = [];
+  for (const s of script) {
+    if (s?.action === 'foreach') {
+      const list = Array.isArray(s.items) ? s.items.map(String) : [];
+      const body = Array.isArray(s.steps) ? s.steps : [];
+      if (!list.length || !body.length) return { error: 'a foreach step needs non-empty `items` and `steps`' };
+      if (body.some((b) => !FLAT_ACTIONS.has(b?.action))) return { error: 'foreach `steps` may only contain navigate/snapshot/click/type/press/extract steps (no nested foreach)' };
+      if (list.length > MAX_FOREACH_ITEMS) {
+        return { error: `foreach has ${list.length} items — the limit is ${MAX_FOREACH_ITEMS}. Split the work into batches of up to ${MAX_FOREACH_ITEMS} items, one execute_actions call each.` };
+      }
+      for (const item of list) {
+        for (const b of body) { steps.push(substituteItem(b, item)); items.push(item); }
+      }
+    } else if (s && FLAT_ACTIONS.has(s.action)) {
+      steps.push(s);
+      items.push(undefined);
+    } else {
+      return { error: `unknown step action: ${JSON.stringify((s as { action?: unknown })?.action)}` };
     }
-  } catch {}
-  return null;
+    if (steps.length > MAX_EXPANDED_STEPS) {
+      return { error: `the script expands to more than ${MAX_EXPANDED_STEPS} steps — split it into smaller batches, one execute_actions call each.` };
+    }
+  }
+  return { steps, items };
+}
+
+function substituteItem(step: FlatScriptStep, item: string): FlatScriptStep {
+  const sub = (v: unknown) => (typeof v === 'string' ? v.split('{{item}}').join(item) : v);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(step)) {
+    out[k] = k === 'target' && v && typeof v === 'object'
+      ? Object.fromEntries(Object.entries(v as ScriptTarget).map(([tk, tv]) => [tk, sub(tv)]))
+      : sub(v);
+  }
+  return out as FlatScriptStep;
 }
 
 function labelFor(name: ToolName, args: Record<string, unknown>): string {
@@ -1422,7 +1614,9 @@ function labelFor(name: ToolName, args: Record<string, unknown>): string {
   }
   if (name === 'list_tabs') return 'list tabs';
   if (name === 'switch_tab') return `switch to tab ${args.tabId ?? ''}`;
-  if (name === 'plan_actions') return 'plan actions';
+  if (name === 'follow_link') return `open link ${args.selector ?? ''}${args.newTab ? ' in new tab' : ''}`;
+  if (name === 'propose_plan') return 'propose plan';
+  if (name === 'update_plan') return 'update plan';
   if (name === 'execute_actions') return 'execute actions';
   return name;
 }
@@ -1444,6 +1638,10 @@ function detailFor(name: ToolName, result: unknown): string | undefined {
   if (name === 'type') {
     const r = result as { label?: string; value?: string };
     if (r?.label) return r.value ? `"${truncate(r.value, 40)}" into "${r.label}"` : `into "${r.label}"`;
+  }
+  if (name === 'navigate' || name === 'follow_link') {
+    const r = result as { url?: string };
+    if (r?.url) return hostFromUrl(r.url) + (() => { try { return new URL(r.url).pathname; } catch { return ''; } })();
   }
   return undefined;
 }

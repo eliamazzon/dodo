@@ -8,9 +8,11 @@ import { PrimaryBtn } from '../components/atoms';
 function summarizeStep(step: ScriptStep): string {
   if (step.action === 'navigate') return `navigate ${step.url}`;
   if (step.action === 'snapshot') return 'snapshot page';
-  if (step.action === 'click') return `click ${step.description || step.target.text || step.target.aria || 'element'}`;
-  if (step.action === 'type') return `type "${step.text}"${step.target.placeholder ? ` into ${step.target.placeholder}` : ''}`;
+  if (step.action === 'click') return `click ${step.description || step.target?.text || step.target?.aria || 'element'}`;
+  if (step.action === 'type') return `type "${step.text}"${step.target?.placeholder ? ` into ${step.target.placeholder}` : ''}`;
+  if (step.action === 'press') return `press ${step.key}${step.target?.text || step.target?.aria ? ` on ${step.target.text || step.target.aria}` : ''}`;
   if (step.action === 'extract') return 'extract page text';
+  if (step.action === 'foreach') return `for each of ${step.items?.length ?? 0} items × ${step.steps?.length ?? 0} steps`;
   return (step as { action: string }).action;
 }
 
@@ -32,11 +34,12 @@ const statusLabel = (s: ExecutionStatus): string => {
 };
 
 export function ExecutionCard({
-  c, script, status, rationale, results, extractedPreview, workingLabel,
+  c, script, expandedCount, status, rationale, results, extractedPreview, workingLabel,
   onApprove, onReject,
 }: {
   c: Palette;
   script: ScriptStep[];
+  expandedCount?: number;
   status: ExecutionStatus;
   rationale?: string;
   results?: StepResult[];
@@ -49,6 +52,12 @@ export function ExecutionCard({
   const isPending = status === 'pending_approval';
   const color = statusColor(c, status);
   const runningIdx = results?.length ?? -1;
+  // `results` index into the foreach-expanded steps. Without a foreach they line up 1:1 with the
+  // script rows (per-row dots); with one, show the script as written plus an overall progress line.
+  const total = expandedCount ?? script.length;
+  const perRow = !script.some((s) => s.action === 'foreach');
+  const okCount = results?.filter((r) => r.status === 'ok').length ?? 0;
+  const lastError = results?.find((r) => r.status === 'error')?.error;
 
   return (
     <div style={{
@@ -68,7 +77,7 @@ export function ExecutionCard({
           fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em',
         }}>{statusLabel(status)}</span>
         <span style={{ flex: 1 }}/>
-        <span style={{ fontSize: 10.5, color: c.muted }}>{script.length} steps</span>
+        <span style={{ fontSize: 10.5, color: c.muted }}>{!perRow && results?.length ? `${okCount}/` : ''}{total} steps</span>
         <Ic.Chevron size={14} style={{ color: c.muted, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}/>
       </div>
 
@@ -80,10 +89,10 @@ export function ExecutionCard({
           <div style={{ position: 'relative', paddingLeft: 16 }}>
             <div style={{ position: 'absolute', left: 4, top: 4, bottom: 4, width: 1, background: c.border }}/>
             {script.map((step, i) => {
-              const stepResult = results?.[i];
-              const isRunning = status === 'running' && i === runningIdx;
+              const stepResult = perRow ? results?.[i] : undefined;
+              const isRunning = perRow && status === 'running' && i === runningIdx;
               const dotColor = stepResult?.status === 'error' ? c.error
-                : stepResult?.status === 'ok' ? c.success
+                : stepResult?.status === 'ok' || (!perRow && status === 'done') ? c.success
                 : isRunning ? c.accent
                 : c.faint;
               return (
@@ -95,6 +104,13 @@ export function ExecutionCard({
                   }}/>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 11.5, color: stepResult?.status === 'error' ? c.error : c.ink, lineHeight: 1.4 }}>{summarizeStep(step)}</div>
+                    {step.action === 'foreach' && (
+                      <div style={{ marginTop: 3, paddingLeft: 8, borderLeft: `1px solid ${c.border}` }}>
+                        {(step.steps ?? []).map((s, j) => (
+                          <div key={j} style={{ fontSize: 11, color: c.muted, lineHeight: 1.45 }}>{summarizeStep(s)}</div>
+                        ))}
+                      </div>
+                    )}
                     {stepResult?.error && (
                       <div style={{ fontSize: 10.5, color: c.error, marginTop: 1 }}>{stepResult.error}</div>
                     )}
@@ -103,6 +119,13 @@ export function ExecutionCard({
               );
             })}
           </div>
+
+          {!perRow && (status === 'running' || status === 'done' || status === 'error') && (
+            <div style={{ fontSize: 10.5, color: c.muted, marginTop: 4 }}>
+              {okCount}/{total} steps done
+              {lastError && <div style={{ color: c.error, marginTop: 2 }}>{lastError}</div>}
+            </div>
+          )}
 
           {workingLabel && status === 'running' && (
             <div style={{ fontSize: 10.5, color: c.muted, marginTop: 8 }}>running: {workingLabel}</div>

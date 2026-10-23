@@ -2,6 +2,7 @@ import type { Palette } from '../../shared/tokens';
 import { DODO_FONT } from '../../shared/tokens';
 import { Ic } from '../../shared/icons';
 import { PrimaryBtn } from '../components/atoms';
+import type { CriticalAction } from '../../shared/types';
 
 // Extra human-in-the-loop confirmation for a checkout/payment-shaped action the local guardrail
 // flagged. Warning-styled (amber accent) to stand apart from the routine permission prompt.
@@ -9,7 +10,7 @@ export function CriticalConfirmCard({
   c, action, label, reason, status, onConfirm, onDeny,
 }: {
   c: Palette;
-  action: 'click' | 'type' | 'press';
+  action: CriticalAction;
   label: string;
   reason: string;
   status: 'pending' | 'confirmed' | 'denied';
@@ -17,7 +18,7 @@ export function CriticalConfirmCard({
   onDeny?: () => void;
 }) {
   const isPending = status === 'pending';
-  const verb = action === 'click' ? 'click' : action === 'type' ? 'fill' : 'submit';
+  const verb = action === 'click' ? 'click' : action === 'type' ? 'fill' : action === 'press' ? 'submit' : 'open';
 
   return (
     <div style={{
@@ -42,7 +43,7 @@ export function CriticalConfirmCard({
         background: c.errorBg, color: c.ink, fontSize: 13, fontWeight: 600,
         maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
-        {action === 'click' ? <Ic.Pointer size={13}/> : <Ic.Key size={13}/>} {label}
+        {action === 'click' ? <Ic.Pointer size={13}/> : action === 'navigate' ? <Ic.Globe size={13}/> : <Ic.Key size={13}/>} {label}
       </div>
       <div style={{
         fontSize: 11.5, color: c.muted, lineHeight: 1.5,

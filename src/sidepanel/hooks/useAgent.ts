@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type AllowlistEntry, type PermissionScope, type PermissionDuration } from '../../shared/types';
+import { INITIAL_AGENT_STATE, DEFAULT_SETTINGS, type AgentState, type Settings, type HistoryItem, type Mode, type AllowlistEntry, type PermissionScope, type PermissionDuration, type AccessLevel } from '../../shared/types';
 import { PORT_NAME, type PanelToBg, type BgToPanel } from '../../shared/messages';
 
 export type AgentSnapshot = {
@@ -88,9 +88,11 @@ export function useAgent() {
     sendMessage: (text: string) => send({ kind: 'send_message', text }),
     approveExecution: (messageId: string) => send({ kind: 'approve_execution', messageId }),
     rejectExecution: (messageId: string) => send({ kind: 'reject_execution', messageId }),
+    approvePlan: (messageId: string, mode: Exclude<Mode, 'plan'>) => send({ kind: 'approve_plan', messageId, mode }),
+    rejectPlan: (messageId: string) => send({ kind: 'reject_plan', messageId }),
     stop: () => send({ kind: 'stop' }),
-    decidePermission: (pattern: string, scope: PermissionScope, duration: PermissionDuration) =>
-      send({ kind: 'allow_host', pattern, scope, duration }),
+    decidePermission: (pattern: string, scope: PermissionScope, duration: PermissionDuration, access: AccessLevel) =>
+      send({ kind: 'allow_host', pattern, scope, duration, access }),
     deny: () => send({ kind: 'deny_permission' }),
     confirmCritical: (messageId: string) => send({ kind: 'confirm_critical', messageId }),
     denyCritical: (messageId: string) => send({ kind: 'deny_critical', messageId }),
